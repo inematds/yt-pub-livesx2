@@ -8,6 +8,10 @@ sem os 35 processos, 18 portas e 17 copias do codigo.
 - **Como funciona:** [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md) — fila de jobs, credenciais, migracao canal a canal, fase 2.
 - **Publicar fora do YouTube:** [`docs/PUBLICADORES.md`](docs/PUBLICADORES.md) — Blotato, Upload-Post, Postiz, Zernio, Ayrshare lado a lado e o encaixe na v2.
 
+## 📖 Guia de uso
+
+Guia completo (landing + passo a passo): **https://inematds.github.io/yt-pub-livesx2/guia/**
+
 ## Em 60 segundos
 
 ```bash

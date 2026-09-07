@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yt-pub-livesx2 — Publicador YouTube para N canais</title>
+<meta name="description" content="yt-pub-livesx2: 1 daemon, 1 banco, 1 painel e N canais em YAML para publicar clips no YouTube com fila de jobs, retry e aviso no Telegram. Versão 2 do yt-pub-livesx.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0c0c10; --bg2:#14141b; --card:#16161e; --line:#272730;
+    --txt:#e9e9ee; --mut:#9a9aa6; --amb:#E2A23B; --amb2:#f0c070; --sky:#38bdf8; --pro:#cbd5e1;
+    color-scheme:dark;
+  }
+  body.light{
+    --bg:#f6f7f9; --bg2:#eceef2; --card:#ffffff; --line:#e1e3ea;
+    --txt:#1a1a22; --mut:#5b5b68; --amb:#b9791d; --amb2:#a16207; --sky:#0369a1; --pro:#b45309;
+    color-scheme:light;
+  }
+  body.light .hero .glow{opacity:.5}
+  body.light pre{background:#0e0e14;color:#d6d6e0}
+  body.light pre .c{color:#8a8a98}
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--txt);font:16px/1.65 Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  h1,h2,h3{font-family:Sora,sans-serif;line-height:1.15;margin:0}
+  a{color:var(--amb);text-decoration:none}
+  code,pre{font-family:"JetBrains Mono",monospace}
+  .wrap{max-width:1160px;margin:0 auto;padding:0 22px}
+  .mut{color:var(--mut)} .amb{color:var(--amb)}
+  .chip{display:inline-block;font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--amb);font-weight:600;font-family:Sora}
+  nav{position:sticky;top:0;z-index:30;backdrop-filter:blur(12px);background:rgba(12,12,16,.78);border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex;align-items:center;gap:22px;height:60px}
+  nav .brand{display:flex;align-items:center;gap:8px;font-family:Sora;font-weight:800;letter-spacing:-.02em;color:var(--amb)}
+  nav .brand .emoji{font-size:1.25rem}
+  nav .sep{color:var(--mut);opacity:.45}
+  nav .inema{color:var(--sky);font-weight:600;font-size:.88rem;font-family:Sora}
+  nav .inema:hover{filter:brightness(1.15)}
+  nav .pro{color:var(--pro);font-weight:600;font-size:.88rem;font-family:Sora}
+  nav .pro:hover{filter:brightness(1.15)}
+  nav .clubpro{display:inline-flex;align-items:center;gap:6px}
+  nav .links{margin-left:auto;display:flex;align-items:center;gap:20px;font-size:.92rem}
+  nav .links a.sec{color:var(--mut)} nav .links a.sec:hover{color:var(--txt)}
+  .tgl{background:var(--bg2);border:1px solid var(--line);color:var(--txt);width:38px;height:38px;border-radius:10px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:1.05rem}
+  .tgl:hover{border-color:var(--amb)}
+  .btn{display:inline-block;background:var(--amb);color:#1a1206;font-weight:600;padding:.6em 1.05em;border-radius:10px;font-family:Sora}
+  .btn.ghost{background:transparent;color:var(--txt);border:1px solid var(--line)}
+  @media(max-width:760px){nav .links a.sec{display:none}}
+  .hero{position:relative;overflow:hidden;border-bottom:1px solid var(--line)}
+  .hero .glow{position:absolute;inset:-40% -20% auto auto;width:70%;height:600px;background:radial-gradient(closest-side,rgba(226,162,59,.22),transparent 70%);pointer-events:none}
+  .hero .wrap{display:grid;grid-template-columns:1.1fr .9fr;gap:40px;align-items:center;padding:74px 22px}
+  .hero h1{font-size:clamp(2.2rem,5vw,3.5rem);font-weight:800;letter-spacing:-.025em}
+  .hero p.lead{font-size:1.18rem;color:var(--mut);margin:1.1em 0 1.6em;max-width:34ch}
+  .hero .cta{display:flex;gap:12px;flex-wrap:wrap}
+  .hero figure{margin:0;border-radius:16px;overflow:hidden;border:1px solid var(--line);box-shadow:0 30px 80px -30px #000}
+  .hero figure img{width:100%;display:block}
+  @media(max-width:780px){.hero .wrap{grid-template-columns:1fr;padding:48px 22px}}
+  section{padding:62px 0;border-bottom:1px solid var(--line)}
+  section h2{font-size:clamp(1.5rem,3.4vw,2.1rem);font-weight:800;letter-spacing:-.02em}
+  section .sub{color:var(--mut);margin:.6em 0 2em;max-width:62ch}
+  .grid{display:grid;gap:16px}
+  .g3{grid-template-columns:repeat(3,1fr)} .g4{grid-template-columns:repeat(4,1fr)} .g2{grid-template-columns:repeat(2,1fr)}
+  @media(max-width:820px){.g3,.g4{grid-template-columns:1fr 1fr}}
+  @media(max-width:540px){.g2,.g3,.g4{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px}
+  .card h3{font-size:1.05rem;margin-bottom:.4em}
+  .card p{color:var(--mut);font-size:.92rem;margin:0}
+  .num{display:inline-flex;width:30px;height:30px;align-items:center;justify-content:center;border-radius:8px;background:rgba(226,162,59,.14);color:var(--amb);font-family:Sora;font-weight:800;font-size:.9rem;margin-bottom:.7em}
+  .flow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
+  .flow span{background:var(--bg2);border:1px solid var(--line);border-radius:999px;padding:.45em .9em;font-size:.85rem;font-family:Sora;font-weight:600}
+  .flow .arr{color:var(--amb);border:none;background:none;padding:0 .1em}
+  pre{background:#0a0a0e;border:1px solid var(--line);border-radius:12px;padding:16px 18px;overflow:auto;font-size:.86rem;line-height:1.6;color:#d6d6e0}
+  pre .c{color:#6f6f7c} pre .k{color:var(--amb2)} pre .s{color:#9ece6a}
+  .step{display:grid;grid-template-columns:46px 1fr;gap:16px;margin-bottom:26px}
+  .step .b{width:46px;height:46px;border-radius:12px;background:var(--amb);color:#1a1206;font-family:Sora;font-weight:800;font-size:1.25rem;display:flex;align-items:center;justify-content:center}
+  .step h3{font-size:1.12rem;margin-bottom:.3em}
+  .step p{color:var(--mut);margin:.2em 0 .7em}
+  .ex{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:680px){.ex{grid-template-columns:1fr}}
+  .ex figure{margin:0;border-radius:14px;overflow:hidden;border:1px solid var(--line)}
+  .ex figure img{width:100%;display:block}
+  .ex figcaption{padding:12px 14px;font-size:.88rem;color:var(--mut);background:var(--card)}
+  .phase{display:flex;gap:14px;padding:16px 0;border-bottom:1px solid var(--line)}
+  .phase:last-child{border:none}
+  .phase .tag{flex:0 0 92px;font-family:Sora;font-weight:800;color:var(--amb)}
+  .phase .d strong{display:block;margin-bottom:.2em}
+  .phase .d span{color:var(--mut);font-size:.92rem}
+  footer{padding:46px 0;text-align:center;color:var(--mut);font-size:.9rem}
+  .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:.3em .8em;font-size:.78rem;color:var(--mut);margin:0 4px}
+  table.cmp{width:100%;border-collapse:collapse;font-size:.92rem;background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  table.cmp th,table.cmp td{padding:10px 14px;text-align:left;border-bottom:1px solid var(--line)}
+  table.cmp th{color:var(--mut);font-family:Sora;font-size:.78rem;letter-spacing:.08em;text-transform:uppercase}
+  table.cmp td.v2{color:var(--amb);font-weight:600}
+</style>
+</head>
+<body>
+
+<nav><div class="wrap">
+  <a class="brand" href="#top"><span class="emoji">📺</span> yt-pub-livesx2</a>
+  <span class="sep">|</span>
+  <span class="clubpro">
+    <a class="inema" href="https://inema.club" target="_blank" rel="noopener">INEMA.CLUB</a>
+    <span class="sep">-</span>
+    <a class="pro" href="https://inema.pro" target="_blank" rel="noopener">PRO</a>
+  </span>
+  <div class="links">
+    <a class="sec" href="#oque">O que é</a>
+    <a class="sec" href="#fluxo">Como funciona</a>
+    <a class="sec" href="#guia">Guia de uso</a>
+    <a class="sec" href="#exemplos">Exemplos</a>
+    <a class="sec" href="#roadmap">Roadmap</a>
+    <button class="tgl" id="themeToggle" aria-label="Alternar tema" title="Alternar tema">🌙</button>
+    <a class="btn" href="https://github.com/inematds/yt-pub-livesx2" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</div></nav>
+
+<header class="hero" id="top">
+  <div class="glow"></div>
+  <div class="wrap">
+    <div>
+      <span class="chip">Publicador YouTube · v2.0.0</span>
+      <h1>Um daemon, um banco, <span class="amb">N canais</span></h1>
+      <p class="lead">Publica clips no YouTube em qualquer número de canais com fila de jobs, horários por canal, retry e aviso no Telegram. Sem 35 processos, sem 17 cópias do código.</p>
+      <div class="cta">
+        <a class="btn" href="#guia">Começar o guia</a>
+        <a class="btn ghost" href="https://github.com/inematds/yt-pub-livesx2" target="_blank" rel="noopener">Ver no GitHub</a>
+      </div>
+    </div>
+    <figure><img src="assets/hero.jpg" alt="Ilustração do yt-pub-livesx2: um hub central distribuindo vídeos para vários canais"></figure>
+  </div>
+</header>
+
+<section id="oque"><div class="wrap">
+  <span class="chip">O que é</span>
+  <h2>A versão 2 do pipeline de lives do INEMA</h2>
+  <p class="sub">O <a href="https://inematds.github.io/yt-pub-livesx/">yt-pub-livesx</a> corta lives em clips e republica em outro canal. Funcionou tão bem que virou 17 instâncias copiadas, 35 processos e 18 portas. A v2 mantém os scripts que fazem o trabalho e troca só a orquestração.</p>
+  <div class="grid g3">
+    <div class="card"><h3>🧩 Um processo para todos os canais</h3><p>O <code>hub.py</code> lê <code>canais/*.yaml</code> a cada 30 s, agenda um job por horário e executa em ordem. Editar o YAML basta: não há restart.</p></div>
+    <div class="card"><h3>🔐 Credenciais ficam onde estão</h3><p>Cada canal aponta <code>config_dir</code> para a pasta que já tem o OAuth. Nada é copiado, nada é migrado. Os 17 canais do v1 entram sem reautenticar.</p></div>
+    <div class="card"><h3>🧾 Fila com estado, não relógio em string</h3><p>Jobs idempotentes por chave, claim atômico em SQLite, retry para falha transitória e recuperação se o processo morrer no meio de um upload.</p></div>
+  </div>
+  <div style="margin-top:26px;overflow-x:auto">
+    <table class="cmp">
+      <thead><tr><th></th><th>v1 (yt-pub-livesx)</th><th>v2 (yt-pub-livesx2)</th></tr></thead>
+      <tbody>
+        <tr><td>processos</td><td>35</td><td class="v2">2</td></tr>
+        <tr><td>portas TCP</td><td>18</td><td class="v2">1</td></tr>
+        <tr><td>bancos SQLite</td><td>17</td><td class="v2">1</td></tr>
+        <tr><td>cópias do código</td><td>19</td><td class="v2">1</td></tr>
+        <tr><td>linhas de orquestração</td><td>11.363</td><td class="v2">965</td></tr>
+        <tr><td>testes automatizados</td><td>0</td><td class="v2">15</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div></section>
+
+<section id="fluxo"><div class="wrap">
+  <span class="chip">Como funciona</span>
+  <h2>Produtores põem na fila, o hub publica</h2>
+  <p class="sub">Qualquer coisa que gere um MP4 com título é um produtor: a CLI, a pasta <code>entrada/&lt;canal&gt;/</code>, um workflow n8n, o cortador de lives. O hub só cuida do quando e do estado.</p>
+  <div class="flow">
+    <span>MP4 + título</span><span class="arr">→</span>
+    <span>clips (fila)</span><span class="arr">→</span>
+    <span>job no horário do canal</span><span class="arr">→</span>
+    <span>token via config_dir</span><span class="arr">→</span>
+    <span>upload resumable</span><span class="arr">→</span>
+    <span>publicado</span><span class="arr">→</span>
+    <span>Telegram</span>
+  </div>
+  <div class="grid g3" style="margin-top:26px">
+    <div class="card"><div class="num">1</div><h3>Entrada</h3><p><code>./hub publicar</code>, ou copiar o arquivo para <code>entrada/&lt;canal&gt;/</code> com um <code>.json</code> opcional ao lado (título, descrição, tags, capa).</p></div>
+    <div class="card"><div class="num">2</div><h3>Agendamento</h3><p>Para cada canal ativo e cada horário do YAML, um job <code>pub:&lt;canal&gt;:&lt;dia HH:MM&gt;</code>. Reiniciar o hub não dobra nem perde publicação.</p></div>
+    <div class="card"><div class="num">3</div><h3>Publicação</h3><p>O <code>runner</code> é o único que publica. Falha de rede volta para a fila; OAuth recusado vira erro visível no painel e na CLI.</p></div>
+  </div>
+</div></section>
+
+<section id="pre"><div class="wrap">
+  <span class="chip">Pré-requisitos</span>
+  <h2>Python, duas libs e credenciais do YouTube</h2>
+  <p class="sub">Nada de Redis, Docker ou framework. Testado em Ubuntu com Python 3.12.</p>
+  <div class="grid g3">
+    <div class="card"><h3>Dependências</h3><p>cryptography (mesmo formato de credencial do v1) e PyYAML.</p><pre><span class="c"># na pasta do projeto</span>
+<span class="k">pip install</span> -r requirements.txt</pre></div>
+    <div class="card"><h3>OAuth de cada canal</h3><p>Um projeto Google Cloud por canal, com <code>.env</code> e <code>credentials.enc</code>. Quem vem do v1 já tem; quem começa do zero usa o script.</p><pre><span class="k">GWS_CONFIG_DIR</span>=/caminho/config scripts/yt-auth</pre></div>
+    <div class="card"><h3>Telegram (opcional)</h3><p>Um bot dedicado para avisar publicações. Token único, na raiz do projeto.</p><pre><span class="k">cp</span> .env.example .env
+<span class="c"># TELEGRAM_NOTIFY_BOT_TOKEN=...</span></pre></div>
+  </div>
+</div></section>
+
+<section id="guia"><div class="wrap">
+  <span class="chip">Guia de uso · passo a passo</span>
+  <h2>Do clone à primeira publicação</h2>
+  <p class="sub">Todos os comandos abaixo existem no repo e foram executados. Nenhum faz upload real até você pedir com <code>--agora</code>.</p>
+
+  <div class="step"><div class="b">1</div><div>
+    <h3>Clonar e instalar</h3>
+    <p>O projeto é só Python e stdlib, mais duas bibliotecas.</p>
+<pre><span class="k">git clone</span> <span class="s">https://github.com/inematds/yt-pub-livesx2</span> ~/projetos/yt-pub-livesx2
+<span class="k">cd</span> ~/projetos/yt-pub-livesx2 && <span class="k">pip install</span> -r requirements.txt</pre>
+  </div></div>
+
+  <div class="step"><div class="b">2</div><div>
+    <h3>Descrever um canal em YAML</h3>
+    <p>Copie o exemplo e aponte <code>config_dir</code> para a pasta que tem o OAuth. Quem tem instâncias v1 pula para o passo 3, que gera os YAML sozinho.</p>
+<pre><span class="k">cp</span> canais/_exemplo.yaml canais/meucanal.yaml
+<span class="c"># destino_nome, config_dir, horarios: ["08:10","16:10"], privacy, telegram_chat_ids, ativo</span></pre>
+  </div></div>
+
+  <div class="step"><div class="b">3</div><div>
+    <h3>Importar o histórico do v1 (somente leitura)</h3>
+    <p>Lê o <code>lives.db</code> de cada <code>yt-pub-livesN</code> em modo read-only, cria <code>canais/livesN.yaml</code> com <code>ativo: false</code> e traz os publicados. Pode rodar de novo quando quiser.</p>
+<pre><span class="k">scripts/importar-historico</span> --todos  <span class="c"># 17 instancias, 12.466 publicacoes importadas</span></pre>
+  </div></div>
+
+  <div class="step"><div class="b">4</div><div>
+    <h3>Conferir canais e credenciais</h3>
+    <p>Um comando mostra qual canal tem OAuth válido. Foi assim que apareceram 4 canais do v1 falhando em silêncio.</p>
+<pre><span class="k">./hub status</span>                <span class="c"># fila, publicados, erros e ultimo por canal</span>
+<span class="k">./hub canais</span> --token        <span class="c"># refresca o token de cada canal: OK ou motivo da falha</span></pre>
+  </div></div>
+
+  <div class="step"><div class="b">5</div><div>
+    <h3>Publicar um vídeo</h3>
+    <p>Direto pela CLI, na hora ou na fila. O <code>--dry-run</code> decripta, refresca o token e monta a metadata, mas para antes do upload.</p>
+<pre><span class="k">./hub publicar</span> video.mp4 --canal lives8 --titulo <span class="s">"Titulo"</span> --dry-run   <span class="c"># valida tudo</span>
+<span class="k">./hub publicar</span> video.mp4 --canal lives8 --titulo <span class="s">"Titulo"</span> --agora     <span class="c"># sobe agora</span>
+<span class="k">./hub publicar</span> video.mp4 --canal lives8 --titulo <span class="s">"Titulo"</span>             <span class="c"># fila, sai no proximo horario</span></pre>
+  </div></div>
+
+  <div class="step"><div class="b">6</div><div>
+    <h3>Ou soltar na pasta de entrada</h3>
+    <p>Mesmo efeito sem CLI, para n8n, scripts ou uma pessoa arrastando arquivos. Um <code>.json</code> com o mesmo nome traz título, descrição, tags e capa.</p>
+<pre><span class="k">cp</span> video.mp4 video.json entrada/lives8/
+<span class="c"># video.json: {"titulo":"...","descricao":"...","tags":["a","b"],"privacy":"public"}</span></pre>
+  </div></div>
+
+  <div class="step"><div class="b">7</div><div>
+    <h3>Subir o daemon e o painel</h3>
+    <p>Dois serviços de usuário no systemd. Com todos os canais inativos o hub só observa; ative um canal por vez trocando <code>ativo: true</code> no YAML e parando o scheduler v1 correspondente.</p>
+<pre><span class="k">cp</span> systemd/yt-hub.service systemd/yt-hub-dashboard.service ~/.config/systemd/user/
+<span class="k">systemctl --user</span> daemon-reload && <span class="k">systemctl --user</span> enable --now yt-hub yt-hub-dashboard
+<span class="c"># painel: http://localhost:8200</span></pre>
+  </div></div>
+
+  <div class="step"><div class="b">8</div><div>
+    <h3>Acompanhar e corrigir</h3>
+    <p>Fila e erros pela CLI ou pelo painel único. Clip com erro volta para a fila com um comando.</p>
+<pre><span class="k">./hub fila</span>            <span class="c"># clips pendentes e com erro</span>
+<span class="k">./hub jobs</span> 20         <span class="c"># ultimos jobs executados</span>
+<span class="k">./hub retry</span> 12467     <span class="c"># clip com erro volta pra fila</span>
+<span class="k">python3 tests/test_jobs.py</span>   <span class="c"># 15 testes, sem rede</span></pre>
+  </div></div>
+</div></section>
+
+<section id="exemplos"><div class="wrap">
+  <span class="chip">Exemplos</span>
+  <h2>Saída real dos comandos</h2>
+  <p class="sub">Capturas de texto da primeira execução, em 2026-09-06, contra as 17 instâncias v1.</p>
+  <div class="grid g2">
+    <div class="card"><h3>./hub status</h3><pre>canal     destino        fila  public. erros  ultimo
+lives1    INEMA TDS         0     2413     0  2026-09-04 17:15
+lives6    INEMA Robot       0     1110     0  2026-09-06 17:40
+lives8    Inema Vibe        0     1043     0  2026-09-06 16:10
+lives11   INEMA Futuros     0      738     0  2026-09-06 21:40
+...
+17 canais | fila 0 | publicados 12466 | erros 0 | hub v2.0.0</pre></div>
+    <div class="card"><h3>./hub canais --token</h3><pre>lives1   OK creds  horarios=08:15,10:15,...
+         token: <span class="k">FALHOU</span> — refresh_token recusado (400)
+lives8   OK creds  horarios=08:10,16:10
+         token: OK
+...
+<span class="c"># 12 canais OK, 5 com OAuth recusado ou expirado:
+# 4 deles publicavam "erro" a cada horario sem ninguem saber</span></pre></div>
+    <div class="card"><h3>./hub publicar --dry-run</h3><pre>clip #12467 na fila de lives8
+  [lives8] publicando #12467: Teste dry-run hub v2
+  [lives8]     token: refresh via .../yt-pub-lives8/config
+  [lives8]     metadata: 'Teste dry-run hub v2' privacy=public
+  [lives8]     DRY RUN — parando antes do upload
+dry-run: ok</pre></div>
+    <div class="card"><h3>canais/lives8.yaml (gerado)</h3><pre>destino_id: UCJxL11aomXJiBZga-JXylgQ
+destino_nome: Inema Vibe
+config_dir: /home/.../yt-pub-lives8/config
+horarios: ["08:10", "16:10"]
+privacy: public
+telegram_chat_ids: ["7852..."]
+ativo: false   <span class="c"># true quando parar o yt-scheduler8</span></pre></div>
+  </div>
+</div></section>
+
+<section id="roadmap"><div class="wrap">
+  <span class="chip">Roadmap</span>
+  <h2>Fase 1 pronta, fase 2 desenhada</h2>
+  <p class="sub">Teto: o núcleo fica abaixo de 1.500 linhas. O que passar disso vira script chamado por um job.</p>
+  <div class="phase"><div class="tag">Feito</div><div class="d"><strong>Núcleo de publicação</strong><span>Daemon, fila de jobs, CLI, painel único, publisher YouTube com dry-run, pasta de entrada, Telegram, importador do v1, 15 testes.</span></div></div>
+  <div class="phase"><div class="tag">Fase 2</div><div class="d"><strong>Corte de lives e thumbnail como jobs</strong><span>Os scripts <code>yt-clip</code> e <code>yt-thumbnail</code> do v1 já estão copiados; viram tipos de job <code>cortar_live</code> e <code>thumb</code> com <code>LIVES_DIR</code> por canal.</span></div></div>
+  <div class="phase"><div class="tag">Fase 2</div><div class="d"><strong>Alerta de erro no Telegram</strong><span>Um chat de admin recebe OAuth recusado e upload com falha. É o que faltou no v1 para não descobrir 4 canais parados por acaso.</span></div></div>
+  <div class="phase"><div class="tag">Fase 2</div><div class="d"><strong>TikTok e Instagram por agregador</strong><span>Publisher com a mesma assinatura do YouTube apontando para Upload-Post ou Blotato. Pesquisa e comparação em <code>docs/PUBLICADORES.md</code>.</span></div></div>
+  <div class="phase"><div class="tag">Migração</div><div class="d"><strong>Canal a canal, sem big bang</strong><span>Parar o <code>yt-schedulerN</code>, trocar <code>ativo: true</code>, observar. As pastas v1 ficam como cofre de credenciais e de lives em disco.</span></div></div>
+</div></section>
+
+<footer>
+  <div class="wrap">
+    <div class="pill">Python 3.12</div><div class="pill">SQLite WAL</div><div class="pill">YouTube Data API v3</div><div class="pill">YAML</div><div class="pill">systemd</div>
+    <p style="margin-top:18px">yt-pub-livesx2 · projeto de pesquisa e educação do INEMA ·
+      <a href="https://github.com/inematds/yt-pub-livesx2">inematds/yt-pub-livesx2</a> ·
+      <a href="https://inema.club">INEMA.CLUB</a></p>
+  </div>
+</footer>
+
+<script>
+  (function(){
+    var KEY='yt-pub-livesx2-theme';
+    var b=document.body, t=document.getElementById('themeToggle');
+    if(localStorage.getItem(KEY)==='light'){ b.classList.add('light'); t.textContent='☀️'; }
+    t.addEventListener('click',function(){
+      var light=b.classList.toggle('light');
+      t.textContent=light?'☀️':'🌙';
+      localStorage.setItem(KEY, light?'light':'dark');
+    });
+  })();
+</script>
+</body>
+</html>
