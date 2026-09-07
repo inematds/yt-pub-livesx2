@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>hub — yt-pub-livesx2</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#0f1115;--fg:#e6e6e6;--mut:#8a8f98;--amb:#f0a742;--ok:#3ddc84;--err:#ff5c5c;--card:#181b22;--b:#262a33}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif}
+header{display:flex;align-items:center;gap:16px;padding:14px 20px;border-bottom:1px solid var(--b)}
+h1{margin:0;font-size:18px;color:var(--amb)} .mut{color:var(--mut)} main{padding:16px 20px;max-width:1200px}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--b);margin-bottom:22px}
+th,td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--b);white-space:nowrap}
+td.t{white-space:normal;max-width:520px} th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase}
+.r{text-align:right} .ok{color:var(--ok)} .err{color:var(--err)} .amb{color:var(--amb)}
+button{background:transparent;border:1px solid var(--amb);color:var(--amb);border-radius:4px;padding:2px 8px;cursor:pointer}
+input{background:var(--card);border:1px solid var(--b);color:var(--fg);padding:5px 8px;border-radius:4px}
+h2{font-size:14px;color:var(--mut);margin:0 0 8px;text-transform:uppercase}
+</style></head><body>
+<header><h1>hub</h1><span id="v" class="mut"></span><span style="flex:1"></span>
+<input id="pw" type="password" placeholder="senha (se houver)" size="16"><button onclick="load()">atualizar</button></header>
+<main>
+<h2>Canais</h2><table id="canais"><thead><tr><th>canal</th><th>destino</th><th class="r">fila</th><th class="r">publicados</th><th class="r">erros</th><th>último</th></tr></thead><tbody></tbody></table>
+<h2>Fila e erros</h2><table id="fila"><thead><tr><th>#</th><th>canal</th><th>status</th><th>tent.</th><th>origem</th><th>título</th><th>erro</th><th></th></tr></thead><tbody></tbody></table>
+<h2>Últimos jobs</h2><table id="jobs"><thead><tr><th>#</th><th>quando</th><th>canal</th><th>tipo</th><th>status</th><th>resultado</th></tr></thead><tbody></tbody></table>
+</main>
+<script>
+const $=s=>document.querySelector(s);const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function api(p,opt={}){const r=await fetch(p,{...opt,headers:{'X-Password':$('#pw').value}});if(r.status===401){alert('senha errada');throw 0}return r.json()}
+async function load(){
+  try{localStorage.setItem('hubpw',$('#pw').value)}catch{}
+  const s=await api('/api/status');$('#v').textContent='v'+s.versao+' · '+s.canais.length+' canais';
+  $('#canais tbody').innerHTML=s.canais.map(c=>`<tr><td>${esc(c.nome)}${c.ativo?'':' <span class=mut>(inativo)</span>'}</td><td>${esc(c.destino_nome||'?')}</td><td class="r amb">${c.fila||0}</td><td class="r ok">${c.publicados||0}</td><td class="r ${c.erros?'err':''}">${c.erros||0}</td><td class=mut>${esc(c.ultimo||'-')}</td></tr>`).join('');
+  const f=await api('/api/fila');$('#fila tbody').innerHTML=f.length?f.map(k=>`<tr><td>${k.id}</td><td>${esc(k.canal)}</td><td class="${k.status==='erro'?'err':'amb'}">${k.status}</td><td>${k.tentativas}</td><td class=mut>${esc(k.origem)}</td><td class=t>${esc(k.titulo)}</td><td class="t err">${esc(k.erro)}</td><td>${k.status==='erro'?`<button onclick="retry(${k.id})">retry</button>`:''}</td></tr>`).join(''):'<tr><td colspan=8 class=mut>fila vazia</td></tr>';
+  const j=await api('/api/jobs');$('#jobs tbody').innerHTML=j.map(x=>`<tr><td>${x.id}</td><td class=mut>${esc(x.run_at)}</td><td>${esc(x.canal)}</td><td>${esc(x.tipo)}</td><td class="${x.status==='erro'?'err':x.status==='ok'?'ok':'amb'}">${x.status}</td><td class=t>${esc(x.resultado||x.erro)}</td></tr>`).join('');
+}
+async function retry(id){await api('/api/retry/'+id,{method:'POST'});load()}
+try{$('#pw').value=localStorage.getItem('hubpw')||''}catch{}
+load();setInterval(load,30000);
+</script></body></html>

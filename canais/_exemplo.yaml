@@ -1,0 +1,19 @@
+# Copie para canais/<nome>.yaml (o hub le a pasta a cada ciclo — sem restart).
+# Arquivos que comecam com "_" sao ignorados.
+# NENHUM segredo aqui: CLIENT_ID/SECRET/API_KEY ficam em <config_dir>/.env,
+# refresh_token em <config_dir>/credentials.enc (mesmo formato do v1 / scripts/yt-auth).
+
+destino_id: UCxxxxxxxxxxxxxxxxxxxxxx      # canal YouTube que recebe os videos
+destino_nome: Meu Canal de Clips
+origem_id: ""                               # canal de lives (so se for cortar lives)
+origem_nome: ""
+
+config_dir: /home/nmaldaner/projetos/yt-pub-lives8/config   # pode apontar pro config/ de uma instancia v1
+lives_dir: ""                               # onde ficam as lives baixadas (fase 2)
+
+horarios: ["08:10", "16:10"]                # 1 clip da fila por horario, todo dia
+privacy: public                             # public | unlisted | private (default dos clips)
+max_tentativas: 3                           # falha transitoria (rede, 5xx) volta pra fila ate isso
+
+telegram_chat_ids: []                       # ex.: ["7852460115", "-100123"]; token em <raiz>/.env
+ativo: true

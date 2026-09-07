@@ -1,0 +1,19 @@
+# Instalar (usuario):
+#   cp systemd/yt-hub.service systemd/yt-hub-dashboard.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now yt-hub yt-hub-dashboard
+# 1 servico pra TODOS os canais (no v1 eram 2 por canal + master = 35 processos).
+[Unit]
+Description=yt-pub-livesx2 hub (todos os canais)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nmaldaner/projetos/yt-pub-livesx2
+ExecStart=/usr/bin/python3 /home/nmaldaner/projetos/yt-pub-livesx2/hub.py
+Restart=always
+RestartSec=10
+Environment=PATH=%h/.deno/bin:/usr/bin:%h/.local/bin:%h/.npm-global/bin
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

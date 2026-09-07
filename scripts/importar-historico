@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Importa uma instancia v1 (yt-pub-livesN) pro hub — SOMENTE LEITURA na origem.
+
+  scripts/importar-historico /home/nmaldaner/projetos/yt-pub-lives8 [--nome lives8]
+  scripts/importar-historico --todos            # todas as yt-pub-lives[0-9]* em ~/projetos
+
+O que faz:
+  1. le data/lives.db (mode=ro): config (canal_destino_*, canal_origem_*, pub_horarios,
+     privacy_padrao, telegram_notify_chat_id) e publicados
+  2. gera canais/<nome>.yaml apontando config_dir pra pasta config/ da instancia (segredos nao se movem)
+  3. insere publicados como clips status=publicado, origem='v1' (idempotente por canal+video_id)
+Nao para, nao edita, nao escreve nada na instancia v1.
+"""
+import glob
+import os
+import sqlite3
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+from lib import canais as canais_mod, db  # noqa: E402
+
+
+def ler_v1(inst):
+    path = os.path.join(inst, 'data', 'lives.db')
+    if not os.path.isfile(path):
+        path = os.path.join(inst, 'data', 'database.db')
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f'sem data/lives.db em {inst}')
+    src = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+    src.row_factory = sqlite3.Row
+    tabelas = {r[0] for r in src.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    cfg = {}
+    if 'config' in tabelas:
+        cfg = {r['chave']: r['valor'] for r in src.execute('SELECT chave, valor FROM config')}
+    pubs = []
+    if 'publicados' in tabelas:
+        pubs = [dict(r) for r in src.execute("SELECT * FROM publicados WHERE clip_video_id NOT IN ('', 'publicando') "
+                                             "AND clip_video_id NOT LIKE 'erro%'")]
+    lives = [dict(r) for r in src.execute('SELECT * FROM lives')] if 'lives' in tabelas else []
+    src.close()
+    return cfg, pubs, lives
+
+
+def importar(inst, nome=None, log=print):
+    inst = os.path.abspath(inst.rstrip('/'))
+    nome = nome or os.path.basename(inst).replace('yt-pub-', '')
+    cfg, pubs, lives = ler_v1(inst)
+    chat = cfg.get('telegram_notify_chat_id', '')
+    canal = canais_mod._norm(nome, {
+        'destino_id': cfg.get('canal_destino_id', ''), 'destino_nome': cfg.get('canal_destino_nome', ''),
+        'origem_id': cfg.get('canal_origem_id', ''), 'origem_nome': cfg.get('canal_origem_nome', ''),
+        'config_dir': os.path.join(inst, 'config'),
+        'lives_dir': os.path.join(inst, 'lives'),
+        'horarios': [h.strip() for h in cfg.get('pub_horarios', '').split(',') if h.strip()],
+        'privacy': cfg.get('privacy_padrao') or 'public',
+        'telegram_chat_ids': [c.strip() for c in chat.split(',') if c.strip()] if cfg.get('telegram_notify_enabled') == 'true' else [],
+        'ativo': False,   # importado inativo: o v1 ainda publica; ativar so quando desligar o schedulerN
+    })
+    ypath = os.path.join(canais_mod.CANAIS_DIR, f'{nome}.yaml')
+    if os.path.exists(ypath):
+        atual = canais_mod.load(nome)
+        canal['ativo'] = atual['ativo']  # nao desativa um canal ja ativado pelo usuario
+        canal['horarios'] = atual['horarios'] or canal['horarios']
+    canais_mod.save(canal)
+    con = db.connect()
+    db.upsert_canal(con, canal)
+    n = 0
+    for p in pubs:
+        vid = p['clip_video_id']
+        if con.execute('SELECT 1 FROM clips WHERE canal=? AND video_id=?', (nome, vid)).fetchone():
+            continue
+        db.add_clip(con, canal=nome, arquivo=p.get('filename') or '', titulo=p.get('clip_titulo') or '',
+                    tags=p.get('tags') or '', privacy=p.get('privacy') or canal['privacy'],
+                    origem=f"live:{p['live_video_id']}" if p.get('live_video_id') else 'v1',
+                    status='publicado', video_id=vid, url=p.get('clip_url') or f'https://www.youtube.com/watch?v={vid}',
+                    publicado_em=p.get('data_publicacao') or '', criado_em=p.get('data_publicacao') or db.now())
+        n += 1
+    for l in lives:
+        if str(l.get('video_id', '')).startswith('import_'):
+            continue
+        con.execute('INSERT OR IGNORE INTO lives(canal,video_id,titulo,data_live,status,qtd_clips) VALUES(?,?,?,?,?,?)',
+                    (nome, l['video_id'], l.get('titulo', ''), l.get('data_live', ''),
+                     'cortada' if l.get('status_cortes') == 'concluido' else l.get('status_cortes', 'pendente'),
+                     int(l.get('qtd_clips') or 0)))
+    log(f'{nome:<10} destino={canal["destino_nome"] or "?":<22} publicados novos={n:<5} total_v1={len(pubs):<5} '
+        f'horarios={",".join(canal["horarios"]) or "-"}  -> {os.path.relpath(ypath, ROOT)}')
+    return n
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    nome = None
+    if '--nome' in sys.argv:
+        nome = sys.argv[sys.argv.index('--nome') + 1]
+        args = [a for a in args if a != nome]
+    if '--todos' in sys.argv:
+        insts = sorted(glob.glob(os.path.expanduser('~/projetos/yt-pub-lives[0-9]*')))
+        insts = [i for i in insts if os.path.isdir(os.path.join(i, 'data'))]
+    elif args:
+        insts = args
+    else:
+        sys.exit(__doc__)
+    total = 0
+    for inst in insts:
+        try:
+            total += importar(inst, nome if len(insts) == 1 else None)
+        except Exception as e:
+            print(f'{os.path.basename(inst):<14} ERRO: {e}')
+    print(f'{len(insts)} instancia(s), {total} publicacao(oes) nova(s) importada(s)')
+
+
+if __name__ == '__main__':
+    main()

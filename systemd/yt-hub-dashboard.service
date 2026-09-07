@@ -1,0 +1,14 @@
+[Unit]
+Description=yt-pub-livesx2 painel unico (porta 8200)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nmaldaner/projetos/yt-pub-livesx2
+ExecStart=/usr/bin/python3 /home/nmaldaner/projetos/yt-pub-livesx2/dashboard/server.py 8200
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

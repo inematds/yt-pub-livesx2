@@ -1,0 +1,903 @@
+#!/usr/bin/env python3
+"""
+yt-thumbnail — Gera thumbnails para clips do YouTube
+Usa LLM para criar prompt estruturado + IA para gerar imagem
+
+Uso:
+  yt-thumbnail --title "Titulo do clip" --output thumb.jpg
+  yt-thumbnail --title "Titulo" --description "Sobre o que eh o clip"
+"""
+
+import sys
+import os
+import json
+import urllib.request
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+import io
+
+# Config
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_DIR = os.environ.get('GWS_CONFIG_DIR', os.path.join(SCRIPT_DIR, '..', 'config'))
+ENV_FILE = os.path.join(CONFIG_DIR, '.env')
+
+# Load env
+if os.path.exists(ENV_FILE):
+    with open(ENV_FILE) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, val = line.split('=', 1)
+                os.environ[key] = val
+
+AGNES_URL = 'https://apihub.agnes-ai.com/v1'
+AGNES_ENV = '/home/nmaldaner/projetos/agnes-nei/.env'
+
+
+def _agnes_key():
+    """Le AGNES_API_KEY em runtime do projeto agnes-nei (nao duplicamos a chave)."""
+    k = os.environ.get('AGNES_API_KEY', '')
+    if k:
+        return k
+    try:
+        with open(AGNES_ENV) as f:
+            for line in f:
+                if line.startswith('AGNES_API_KEY='):
+                    return line.split('=', 1)[1].strip()
+    except OSError:
+        pass
+    return ''
+
+
+AGNES_API_KEY = _agnes_key()
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
+OPENROUTER_URL = 'https://openrouter.ai/api/v1'
+IMAGE_MODEL = os.environ.get('THUMB_MODEL', 'flux2-klein-4b')
+CHAT_MODEL = 'claude-sonnet-4.5'
+AGNES_CHAT_MODEL = 'agnes-2.5-flash'
+AGNES_IMAGE_MODEL = 'agnes-image-2.1-flash'
+
+# LLM provider configs (loaded from env, set by scheduler)
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+ANTHROPIC_URL = 'https://api.anthropic.com/v1'
+
+PROVIDER_MAP = {
+    'agnes': {'url': AGNES_URL, 'key_env': 'AGNES_API_KEY'},
+    'openrouter': {'url': OPENROUTER_URL, 'key_env': 'OPENROUTER_API_KEY'},
+    'anthropic': {'url': ANTHROPIC_URL, 'key_env': 'ANTHROPIC_API_KEY'},
+    'claude-oauth': {'url': None, 'key_env': None},
+}
+
+def _get_llm_chain():
+    """Build ordered list of LLM providers to try, from env vars."""
+    chain = []
+    for i in range(1, 4):
+        provider = os.environ.get(f'THUMB_LLM_{i}_PROVIDER', '').strip()
+        model = os.environ.get(f'THUMB_LLM_{i}_MODEL', '').strip()
+        if not provider:
+            continue
+        if provider not in PROVIDER_MAP:
+            continue
+        if provider == 'claude-oauth':
+            # Claude CLI nao precisa de key nem model
+            chain.append({'provider': 'claude-oauth', 'model': model or 'default', 'url': None, 'api_key': None})
+            continue
+        if not model:
+            continue
+        info = PROVIDER_MAP[provider]
+        api_key = AGNES_API_KEY if provider == 'agnes' else os.environ.get(info['key_env'], '')
+        if not api_key:
+            continue
+        chain.append({'provider': provider, 'model': model, 'url': info['url'], 'api_key': api_key})
+    # Fallback: se nenhum configurado, usa o Agnes (free)
+    if not chain and AGNES_API_KEY:
+        chain.append({'provider': 'agnes', 'model': AGNES_CHAT_MODEL,
+                      'url': AGNES_URL, 'api_key': AGNES_API_KEY})
+    return chain
+
+BRAND = os.environ.get('THUMB_BRAND', 'INEMA TDS')
+WIDTH = 1280
+HEIGHT = 720
+FONT_PATH = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+
+# Visual config from environment (overridable via dashboard)
+THUMB_FONT_SIZE = int(os.environ.get('THUMB_FONT_SIZE', '78'))
+THUMB_TEXT_COLOR = os.environ.get('THUMB_TEXT_COLOR', '#FFFFFF')
+THUMB_ACCENT_COLOR = os.environ.get('THUMB_ACCENT_COLOR', '#00D4FF')
+THUMB_BRAND_COLOR = os.environ.get('THUMB_BRAND_COLOR', '#6366F1')
+THUMB_TEXT_POSITION = os.environ.get('THUMB_TEXT_POSITION', 'top-left')
+
+
+def hex_to_rgb(hex_color):
+    """Convert hex color (#RRGGBB) to RGB tuple."""
+    hex_color = hex_color.lstrip('#')
+    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+DEFAULT_SYSTEM_PROMPT = """Voce e especialista na criacao de prompts para geracao de thumbnails de YouTube para o canal INEMA TDS (canal de tecnologia, programacao, IA e automacao).
+
+Sua missao e transformar qualquer titulo de video em um prompt detalhado, otimizado para alta taxa de cliques (CTR) e pronto para uso em geradores de imagem.
+
+Checklist:
+1) Analise o titulo e identifique tema e emocao central.
+2) Escolha uma metafora visual FORTE e INESPERADA ligada ao tema.
+3) Defina cores vibrantes e contrastantes.
+4) Crie uma frase curta e impactante (max 5 palavras em portugues).
+5) Pense na composicao: espaco para texto, foco visual, alto contraste.
+
+Diretrizes:
+- Estilo: fotorealista com iluminacao cinematica, alto contraste
+- Cores: vibrantes, contrastantes (neon azul, roxo, laranja, vermelho)
+- Proporcao: 16:9 (1792x1024)
+- A frase curta NAO e o titulo completo, e uma versao impactante de 2-5 palavras
+- Metafora visual deve ser algo CONCRETO e VISUAL (objeto, cena, acao)
+- NAO incluir: marcas d'agua, bordas, logotipos, emojis, textos longos, conteudo sensivel, maos deformadas
+
+Retorne SOMENTE este JSON:
+{
+  "frase_curta": "(string; 2-5 palavras impactantes em portugues)",
+  "cena_principal": "(string; descricao detalhada da cena/metafora visual principal)",
+  "fundo_tematico": "(string; cenario coerente com o tema)",
+  "cores_dominantes": "(string; cores vibrantes separadas por virgula)",
+  "composicao": "(string; como os elementos estao dispostos, onde fica o espaco para texto)",
+  "negative_prompt": "watermark, border, long text, deformed hands, extra fingers, cluttered, low quality, blurry text"
+}"""
+
+# Load custom prompt from config file if exists
+_prompt_file = os.path.join(CONFIG_DIR, 'prompt_thumb.txt')
+if os.path.exists(_prompt_file):
+    with open(_prompt_file) as _f:
+        _custom = _f.read().strip()
+        if _custom:
+            SYSTEM_PROMPT = _custom
+        else:
+            SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
+else:
+    SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
+
+
+def _call_llm_claude_oauth(system_prompt, user_msg):
+    """Call Claude CLI (OAuth) via subprocess. Returns content string."""
+    import subprocess
+    full_prompt = f'{system_prompt}\n\n---\n\n{user_msg}'
+    result = subprocess.run(
+        ['claude', '-p', '--output-format', 'json', full_prompt],
+        capture_output=True, text=True, timeout=120
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f'Claude CLI erro (code {result.returncode}): {result.stderr[:200]}')
+    data = json.loads(result.stdout)
+    if data.get('is_error'):
+        raise RuntimeError(f'Claude CLI retornou erro: {data.get("result", "")[:200]}')
+    return data.get('result', '')
+
+
+def _call_llm_anthropic(provider_cfg, system_prompt, user_msg):
+    """Call Anthropic Messages API directly. Returns content string."""
+    payload = {
+        'model': provider_cfg['model'],
+        'system': system_prompt,
+        'messages': [{'role': 'user', 'content': user_msg}],
+        'temperature': 0.7,
+        'max_tokens': 500
+    }
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(f'{provider_cfg["url"]}/messages', data=body)
+    req.add_header('Content-Type', 'application/json')
+    req.add_header('x-api-key', provider_cfg['api_key'])
+    req.add_header('anthropic-version', '2023-06-01')
+
+    resp = urllib.request.urlopen(req, timeout=60)
+    result = json.loads(resp.read())
+    return result['content'][0]['text']
+
+
+def _call_llm(provider_cfg, messages):
+    """Call a single LLM provider (OpenAI-compatible API). Returns parsed content or raises."""
+    payload = {
+        'model': provider_cfg['model'],
+        'messages': messages,
+        'temperature': 0.7,
+        'max_tokens': 500
+    }
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(f'{provider_cfg["url"]}/chat/completions', data=body)
+    req.add_header('Content-Type', 'application/json')
+    req.add_header('Authorization', f'Bearer {provider_cfg["api_key"]}')
+
+    resp = urllib.request.urlopen(req, timeout=60)
+    result = json.loads(resp.read())
+    return result['choices'][0]['message']['content']
+
+
+def generate_prompt_json(title, description=''):
+    """Usa LLM para gerar o JSON estruturado do prompt. Tenta multiplos providers."""
+    user_msg = f'Titulo do video: "{title}"'
+    if description:
+        user_msg += f'\nDescricao: {description}'
+    # Os campos visuais alimentam o gerador de imagem. Prompt em portugues
+    # apanha do filtro de conteudo do Agnes e volta HTTP 400, entao a parte
+    # visual vai em ingles. O texto sobreposto e aplicado depois pelo Pillow,
+    # esse continua em portugues.
+    user_msg += ('\n\nIMPORTANTE: escreva os campos visuais '
+                 '(cena_principal, fundo_tematico, cores_dominantes, composicao, '
+                 'negative_prompt) EM INGLES. Os campos de texto que aparecem na '
+                 'thumbnail continuam em portugues.')
+
+    messages = [
+        {'role': 'system', 'content': SYSTEM_PROMPT},
+        {'role': 'user', 'content': user_msg}
+    ]
+
+    chain = _get_llm_chain()
+    if not chain:
+        raise ValueError('Nenhum provider LLM configurado')
+
+    import re
+    last_err = None
+    for i, cfg in enumerate(chain, 1):
+        try:
+            print(f'  [1/3] Gerando prompt com LLM ({cfg["provider"]}/{cfg["model"]}) tentativa {i}/{len(chain)}...', flush=True)
+            if cfg['provider'] == 'claude-oauth':
+                content = _call_llm_claude_oauth(SYSTEM_PROMPT, user_msg)
+            elif cfg['provider'] == 'anthropic':
+                content = _call_llm_anthropic(cfg, SYSTEM_PROMPT, user_msg)
+            else:
+                content = _call_llm(cfg, messages)
+            json_match = re.search(r'\{[\s\S]*\}', content)
+            if json_match:
+                return json.loads(json_match.group())
+            raise ValueError(f'LLM nao retornou JSON valido: {content[:200]}')
+        except Exception as e:
+            last_err = e
+            print(f'  LLM {i} falhou ({cfg["provider"]}/{cfg["model"]}): {e}', file=sys.stderr, flush=True)
+            continue
+
+    raise last_err
+
+
+def build_image_prompt(prompt_data):
+    """Monta o prompt final para o gerador de imagem."""
+    return (
+        f'IMPORTANT: DO NOT include any text, letters, words or writing in the image. '
+        f'Professional YouTube thumbnail, photorealistic, cinematic lighting. '
+        f'Scene: {prompt_data["cena_principal"]}. '
+        f'Background: {prompt_data["fundo_tematico"]}. '
+        f'Color scheme: {prompt_data["cores_dominantes"]}. '
+        f'Composition: {prompt_data["composicao"]}. '
+        f'Style: Realistic photo with cinematic lighting, high contrast, dramatic shadows, '
+        f'optimized for YouTube thumbnail. Aspect ratio 16:9. '
+        f'NO TEXT IN IMAGE. '
+        f'Do not include: text, letters, words, writing, {prompt_data["negative_prompt"]}'
+    )
+
+
+KIE_API_KEY = os.environ.get('KIE_API_KEY', '')
+KIE_URL = 'https://api.kie.ai/api/v1'
+MINIMAX_API_KEY = os.environ.get('MINIMAX_API_KEY', '')
+MINIMAX_URL = 'https://api.minimax.io/v1'
+GOOGLE_API_KEY = os.environ.get('GOOGLE_IMAGE_API_KEY', '') or os.environ.get('GEMINI_API_KEY', '')
+GOOGLE_IMAGE_MODEL = os.environ.get('GOOGLE_IMAGE_MODEL', 'imagen-4.0-fast-generate-001')
+INEMAIMG_URL = os.environ.get('INEMAIMG_URL', 'http://localhost:8000')
+INEMAIMG_MODEL_DEFAULT = 'flux2-klein'
+INEMAIMG_TIMEOUT = int(os.environ.get('INEMAIMG_TIMEOUT_S', '1800'))
+
+# Image provider config from env
+IMAGE_PROVIDER = os.environ.get('THUMB_IMAGE_PROVIDER', 'agnes')
+
+# Kie model -> endpoint mapping
+KIE_ENDPOINTS = {
+    'gpt4o-image': '/gpt4o-image/generate',
+    'flux-kontext-pro': '/flux/kontext/generate',
+    'flux-kontext-max': '/flux/kontext/generate',
+}
+
+
+def _generate_image_agnes(image_prompt):
+    """Gera imagem via Agnes (OpenAI-compatible, free).
+
+    Duas particularidades medidas em ~/projetos/agnes-nei/NOTAS-API.md:
+    - ~34% das chamadas devolvem 503; o retry com backoff recupera quase tudo.
+    - prompt em portugues apanha do filtro de conteudo e volta 400, entao o
+      prompt de imagem vai em ingles (ver build_image_prompt).
+    - response_format so funciona dentro de extra_body.
+    """
+    import time
+    if not AGNES_API_KEY:
+        raise ValueError('AGNES_API_KEY nao encontrada (ver ' + AGNES_ENV + ')')
+
+    payload = {
+        'model': AGNES_IMAGE_MODEL,
+        'prompt': image_prompt,
+        'size': '1K',
+        'ratio': '16:9',
+        'extra_body': {'response_format': 'url'},
+    }
+    body = json.dumps(payload).encode()
+
+    ultimo = ''
+    for tentativa in range(6):
+        req = urllib.request.Request(f'{AGNES_URL}/images/generations', data=body)
+        req.add_header('Content-Type', 'application/json')
+        req.add_header('Authorization', f'Bearer {AGNES_API_KEY}')
+        try:
+            result = json.loads(urllib.request.urlopen(req, timeout=400).read())
+            data = result.get('data', [])
+            if data and data[0].get('url'):
+                return data[0]['url']
+            ultimo = 'resposta sem url'
+        except urllib.error.HTTPError as e:
+            ultimo = f'HTTP {e.code}'
+            if e.code == 400:
+                # filtro de conteudo — retry nao resolve
+                raise ValueError(f'Agnes recusou o prompt (400): {e.read().decode()[:200]}')
+        except Exception as e:
+            ultimo = f'{type(e).__name__}: {e}'
+        if tentativa < 5:
+            time.sleep(2 ** tentativa)
+    raise ValueError(f'Agnes falhou apos 6 tentativas ({ultimo})')
+
+
+def _generate_image_kie(image_prompt):
+    """Gera imagem via Kie.ai API (assincrono, polling)."""
+    import time
+    model = IMAGE_MODEL
+
+    # Modelos que usam /jobs/createTask (novo endpoint unificado)
+    if model in ('z-image',):
+        # z-image tem limite de 1000 chars e funciona melhor com prompts curtos
+        short_prompt = image_prompt
+        if len(image_prompt) > 400:
+            # Extrair essencia: pegar ate o primeiro ponto da cena + cores
+            parts = image_prompt.split('. ')
+            short_prompt = '. '.join(parts[:3])[:400]
+            if not short_prompt.endswith('.'):
+                short_prompt += '.'
+            short_prompt += ' Photorealistic, cinematic, 16:9. DO NOT include any text, letters or words in the image.'
+        payload = {
+            'model': model,
+            'input': {
+                'prompt': short_prompt,
+                'aspect_ratio': '16:9'
+            }
+        }
+        endpoint = '/jobs/createTask'
+    elif 'flux-kontext' in model:
+        payload = {
+            'prompt': image_prompt,
+            'model': model,
+            'aspectRatio': '16:9',
+            'outputFormat': 'jpeg',
+        }
+        endpoint = KIE_ENDPOINTS.get(model, '/flux/kontext/generate')
+    else:
+        payload = {
+            'prompt': image_prompt,
+            'size': '3:2',
+        }
+        if model not in KIE_ENDPOINTS:
+            payload['model'] = model
+        endpoint = KIE_ENDPOINTS.get(model, '/gpt4o-image/generate')
+
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(f'{KIE_URL}{endpoint}', data=body)
+    req.add_header('Content-Type', 'application/json')
+    req.add_header('Authorization', f'Bearer {KIE_API_KEY}')
+
+    resp = urllib.request.urlopen(req, timeout=60)
+    result = json.loads(resp.read())
+    if result.get('code') != 200:
+        raise ValueError(f'Kie erro: {result.get("msg", "unknown")}')
+
+    task_id = result['data']['taskId']
+    print(f'  Kie task: {task_id}, aguardando...', flush=True)
+
+    # Poll for result (max 180s)
+    for attempt in range(60):
+        time.sleep(3)
+        poll_url = f'{KIE_URL}/jobs/recordInfo?taskId={task_id}'
+        poll_req = urllib.request.Request(poll_url)
+        poll_req.add_header('Authorization', f'Bearer {KIE_API_KEY}')
+        poll_resp = urllib.request.urlopen(poll_req, timeout=30)
+        poll_data = json.loads(poll_resp.read())
+
+        data = poll_data.get('data') or {}
+        state = data.get('state', '')
+        if state == 'success':
+            result_json = json.loads(data.get('resultJson', '{}'))
+            urls = result_json.get('resultUrls', [])
+            if urls:
+                return urls[0]
+            raise ValueError('Kie retornou sucesso mas sem URL')
+        elif state == 'fail':
+            raise ValueError(f'Kie task falhou: {poll_data}')
+        # waiting/queuing/generating/null -> continue
+        if attempt % 10 == 9:
+            print(f'  Kie ainda processando... ({(attempt+1)*3}s)', flush=True)
+
+    raise ValueError('Kie timeout (180s)')
+
+
+def _generate_image_minimax(image_prompt):
+    """Gera imagem via MiniMax API (image-01)."""
+    import base64 as b64
+    payload = {
+        'model': 'image-01',
+        'prompt': image_prompt,
+        'aspect_ratio': '16:9',
+        'response_format': 'base64'
+    }
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(f'{MINIMAX_URL}/image_generation', data=body)
+    req.add_header('Content-Type', 'application/json')
+    req.add_header('Authorization', f'Bearer {MINIMAX_API_KEY}')
+
+    resp = urllib.request.urlopen(req, timeout=120)
+    result = json.loads(resp.read())
+
+    base_resp = result.get('base_resp', {})
+    if base_resp.get('status_code', 0) != 0:
+        raise ValueError(f'MiniMax erro: {base_resp.get("status_msg", "unknown")}')
+
+    data = result.get('data', [])
+    if not data:
+        raise ValueError('MiniMax nao retornou imagem')
+
+    img_b64 = data[0].get('b64_image', '')
+    if not img_b64:
+        raise ValueError('MiniMax sem base64 na resposta')
+
+    img_bytes = b64.b64decode(img_b64)
+    return img_bytes
+
+
+def _generate_image_local(image_prompt):
+    """Gera imagem via inemaimg local (FastAPI em INEMAIMG_URL, padrao do imkt4/timesmkt3)."""
+    import base64 as b64
+    model = IMAGE_MODEL or INEMAIMG_MODEL_DEFAULT
+    # 1024x576 = 16:9 exato e multiplos de 64 (requisito do servidor)
+    payload = {
+        'model': model,
+        'prompt': image_prompt,
+        'width': 1024,
+        'height': 576,
+    }
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(f'{INEMAIMG_URL}/generate', data=body)
+    req.add_header('Content-Type', 'application/json')
+
+    resp = urllib.request.urlopen(req, timeout=INEMAIMG_TIMEOUT)
+    result = json.loads(resp.read())
+    img_b64 = result.get('image')
+    if not img_b64:
+        raise ValueError(f'inemaimg nao retornou image. keys={list(result.keys())}')
+    return b64.b64decode(img_b64)
+
+
+def _generate_image_google(image_prompt):
+    """Gera imagem via Google Imagen API."""
+    import base64 as b64
+    model = GOOGLE_IMAGE_MODEL
+    payload = {
+        'instances': [{'prompt': image_prompt}],
+        'parameters': {'sampleCount': 1, 'aspectRatio': '16:9'}
+    }
+    body = json.dumps(payload).encode()
+    url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:predict?key={GOOGLE_API_KEY}'
+    req = urllib.request.Request(url, data=body)
+    req.add_header('Content-Type', 'application/json')
+
+    resp = urllib.request.urlopen(req, timeout=120)
+    result = json.loads(resp.read())
+    predictions = result.get('predictions', [])
+    if not predictions:
+        raise ValueError('Google Imagen nao retornou imagem')
+
+    img_bytes = b64.b64decode(predictions[0]['bytesBase64Encoded'])
+    return img_bytes
+
+
+def generate_ai_image(image_prompt):
+    """Gera imagem usando o provider configurado."""
+    provider = IMAGE_PROVIDER
+    print(f'  [2/3] Gerando imagem com {provider}/{IMAGE_MODEL}...', flush=True)
+
+    if provider in ('minimax', 'google', 'local'):
+        if provider == 'minimax':
+            img_bytes = _generate_image_minimax(image_prompt)
+        elif provider == 'local':
+            img_bytes = _generate_image_local(image_prompt)
+        else:
+            img_bytes = _generate_image_google(image_prompt)
+        img = Image.open(io.BytesIO(img_bytes))
+        img = img.resize((WIDTH, HEIGHT), Image.LANCZOS).convert('RGB')
+        return img
+    elif provider == 'kie':
+        img_url = _generate_image_kie(image_prompt)
+    else:
+        img_url = _generate_image_agnes(image_prompt)
+
+    # Download
+    dl_req = urllib.request.Request(img_url)
+    dl_req.add_header('User-Agent', 'Mozilla/5.0')
+    with urllib.request.urlopen(dl_req, timeout=60) as resp:
+        img_data = resp.read()
+
+    img = Image.open(io.BytesIO(img_data))
+    img = img.resize((WIDTH, HEIGHT), Image.LANCZOS).convert('RGB')
+    return img
+
+
+def create_gradient_bg():
+    """Fallback local."""
+    img = Image.new('RGB', (WIDTH, HEIGHT))
+    for y in range(HEIGHT):
+        r = int(10 + 10 * y / HEIGHT)
+        g = int(10 + 5 * y / HEIGHT)
+        b = int(30 + 20 * y / HEIGHT)
+        for x in range(WIDTH):
+            img.putpixel((x, y), (r, g, b))
+    return img
+
+
+def wrap_text(text, font, max_width, draw):
+    """Quebra texto em linhas."""
+    words = text.split()
+    lines = []
+    current = ''
+    for word in words:
+        test = (current + ' ' + word).strip()
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if bbox[2] - bbox[0] > max_width and current:
+            lines.append(current)
+            current = word
+        else:
+            current = test
+    if current:
+        lines.append(current)
+    return lines[:3]
+
+
+# Font path mapping
+FONT_MAP = {
+    'montserrat-extrabold': os.path.expanduser('~/.local/share/fonts/Montserrat-ExtraBold.ttf'),
+    'montserrat-black': os.path.expanduser('~/.local/share/fonts/Montserrat-Black.ttf'),
+    'bebas-neue': os.path.expanduser('~/.local/share/fonts/BebasNeue-Regular.ttf'),
+    'anton': os.path.expanduser('~/.local/share/fonts/Anton-Regular.ttf'),
+    'dejavu': '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+}
+
+
+PRESETS = {
+    'premium': {'DESIGN_FONT':'montserrat-extrabold','DESIGN_FONT_SIZE':'82','DESIGN_LAST_LINE_SCALE':'15','DESIGN_LINE_HEIGHT':'90','DESIGN_TRACKING':'tight','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#F5F3EE','DESIGN_HIGHLIGHT_COLOR':'#D9B65B','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#D9B65B','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'blur','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'8','DESIGN_SHADOW_OPACITY':'180','DESIGN_GRADIENT':'top-left','DESIGN_GRADIENT_OPACITY':'160','DESIGN_GRADIENT_COVERAGE':'40','DESIGN_BRAND_FONT':'montserrat-extrabold','DESIGN_BRAND_SIZE':'26','DESIGN_BRAND_COLOR':'#D9B65B','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'top-left'},
+    'youtube': {'DESIGN_FONT':'anton','DESIGN_FONT_SIZE':'90','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'96','DESIGN_TRACKING':'normal','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_COLOR':'#FFFF00','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#FF0000','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'outline','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'4','DESIGN_SHADOW_OPACITY':'255','DESIGN_GRADIENT':'none','DESIGN_GRADIENT_OPACITY':'0','DESIGN_GRADIENT_COVERAGE':'0','DESIGN_BRAND_FONT':'anton','DESIGN_BRAND_SIZE':'28','DESIGN_BRAND_COLOR':'#FF0000','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'center-left'},
+    'clean': {'DESIGN_FONT':'montserrat-extrabold','DESIGN_FONT_SIZE':'76','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'88','DESIGN_TRACKING':'tight','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_ENABLED':'false','DESIGN_ACCENT_COLOR':'#6366F1','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'blur','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'6','DESIGN_SHADOW_OPACITY':'150','DESIGN_GRADIENT':'left','DESIGN_GRADIENT_OPACITY':'120','DESIGN_GRADIENT_COVERAGE':'35','DESIGN_BRAND_FONT':'montserrat-extrabold','DESIGN_BRAND_SIZE':'24','DESIGN_BRAND_COLOR':'#6366F1','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'top-left'},
+    'neon': {'DESIGN_FONT':'bebas-neue','DESIGN_FONT_SIZE':'88','DESIGN_LAST_LINE_SCALE':'10','DESIGN_LINE_HEIGHT':'92','DESIGN_TRACKING':'normal','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#00F5FF','DESIGN_HIGHLIGHT_COLOR':'#FF00FF','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#00F5FF','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'blur','DESIGN_SHADOW_COLOR':'#00F5FF','DESIGN_SHADOW_SIZE':'10','DESIGN_SHADOW_OPACITY':'100','DESIGN_GRADIENT':'top-left','DESIGN_GRADIENT_OPACITY':'180','DESIGN_GRADIENT_COVERAGE':'45','DESIGN_BRAND_FONT':'bebas-neue','DESIGN_BRAND_SIZE':'28','DESIGN_BRAND_COLOR':'#00F5FF','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'top-left'},
+    'fallback': {'DESIGN_FONT':'montserrat-extrabold','DESIGN_FONT_SIZE':'72','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'84','DESIGN_TRACKING':'tight','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_ENABLED':'false','DESIGN_ACCENT_COLOR':'#6366F1','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'outline','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'3','DESIGN_SHADOW_OPACITY':'255','DESIGN_GRADIENT':'none','DESIGN_GRADIENT_OPACITY':'0','DESIGN_GRADIENT_COVERAGE':'0','DESIGN_BRAND_FONT':'dejavu','DESIGN_BRAND_SIZE':'24','DESIGN_BRAND_COLOR':'#6366F1','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'top-left'},
+    'mrbeast': {'DESIGN_FONT':'anton','DESIGN_FONT_SIZE':'100','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'105','DESIGN_TRACKING':'normal','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_COLOR':'#FFD700','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#FFD700','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'false','DESIGN_SHADOW_TYPE':'outline','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'5','DESIGN_SHADOW_OPACITY':'255','DESIGN_GRADIENT':'none','DESIGN_GRADIENT_OPACITY':'0','DESIGN_GRADIENT_COVERAGE':'0','DESIGN_BRAND_FONT':'anton','DESIGN_BRAND_SIZE':'30','DESIGN_BRAND_COLOR':'#FFD700','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'center-left'},
+    'techreview': {'DESIGN_FONT':'montserrat-black','DESIGN_FONT_SIZE':'78','DESIGN_LAST_LINE_SCALE':'10','DESIGN_LINE_HEIGHT':'88','DESIGN_TRACKING':'tight','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#E3F2FD','DESIGN_HIGHLIGHT_COLOR':'#4FC3F7','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#4FC3F7','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'blur','DESIGN_SHADOW_COLOR':'#0D47A1','DESIGN_SHADOW_SIZE':'8','DESIGN_SHADOW_OPACITY':'160','DESIGN_GRADIENT':'top-left','DESIGN_GRADIENT_OPACITY':'150','DESIGN_GRADIENT_COVERAGE':'45','DESIGN_BRAND_FONT':'montserrat-extrabold','DESIGN_BRAND_SIZE':'24','DESIGN_BRAND_COLOR':'#4FC3F7','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'top-left'},
+    'tutorial': {'DESIGN_FONT':'montserrat-extrabold','DESIGN_FONT_SIZE':'80','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'90','DESIGN_TRACKING':'tight','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_COLOR':'#4CAF50','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#4CAF50','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'outline','DESIGN_SHADOW_COLOR':'#1B5E20','DESIGN_SHADOW_SIZE':'3','DESIGN_SHADOW_OPACITY':'220','DESIGN_GRADIENT':'top','DESIGN_GRADIENT_OPACITY':'140','DESIGN_GRADIENT_COVERAGE':'35','DESIGN_BRAND_FONT':'montserrat-extrabold','DESIGN_BRAND_SIZE':'26','DESIGN_BRAND_COLOR':'#4CAF50','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'top-left'},
+    'breaking': {'DESIGN_FONT':'anton','DESIGN_FONT_SIZE':'94','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'100','DESIGN_TRACKING':'normal','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#FFEB3B','DESIGN_HIGHLIGHT_COLOR':'#FF5722','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#FF5722','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'outline','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'4','DESIGN_SHADOW_OPACITY':'255','DESIGN_GRADIENT':'full-bottom','DESIGN_GRADIENT_OPACITY':'200','DESIGN_GRADIENT_COVERAGE':'50','DESIGN_BRAND_FONT':'anton','DESIGN_BRAND_SIZE':'28','DESIGN_BRAND_COLOR':'#FFEB3B','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'bottom-left'},
+    'minimal': {'DESIGN_FONT':'montserrat-extrabold','DESIGN_FONT_SIZE':'68','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'80','DESIGN_TRACKING':'very-tight','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#1A1A1A','DESIGN_HIGHLIGHT_COLOR':'#1A1A1A','DESIGN_HIGHLIGHT_ENABLED':'false','DESIGN_ACCENT_COLOR':'#E0E0E0','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'false','DESIGN_SHADOW_TYPE':'none','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'0','DESIGN_SHADOW_OPACITY':'0','DESIGN_GRADIENT':'left','DESIGN_GRADIENT_OPACITY':'200','DESIGN_GRADIENT_COVERAGE':'50','DESIGN_BRAND_FONT':'montserrat-extrabold','DESIGN_BRAND_SIZE':'22','DESIGN_BRAND_COLOR':'#9E9E9E','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'center-left'},
+    'cinematic': {'DESIGN_FONT':'montserrat-black','DESIGN_FONT_SIZE':'80','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'88','DESIGN_TRACKING':'tight','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#F5A623','DESIGN_HIGHLIGHT_COLOR':'#00C2C7','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#F5A623','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'blur','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'10','DESIGN_SHADOW_OPACITY':'200','DESIGN_GRADIENT':'top-left','DESIGN_GRADIENT_OPACITY':'180','DESIGN_GRADIENT_COVERAGE':'50','DESIGN_BRAND_FONT':'montserrat-extrabold','DESIGN_BRAND_SIZE':'24','DESIGN_BRAND_COLOR':'#F5A623','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'bottom-left'},
+    'gradient': {'DESIGN_FONT':'montserrat-black','DESIGN_FONT_SIZE':'84','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'92','DESIGN_TRACKING':'tight','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#BF00FF','DESIGN_HIGHLIGHT_COLOR':'#FF007F','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#8B00FF','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'blur','DESIGN_SHADOW_COLOR':'#4A0080','DESIGN_SHADOW_SIZE':'8','DESIGN_SHADOW_OPACITY':'150','DESIGN_GRADIENT':'top-left','DESIGN_GRADIENT_OPACITY':'160','DESIGN_GRADIENT_COVERAGE':'40','DESIGN_BRAND_FONT':'montserrat-extrabold','DESIGN_BRAND_SIZE':'24','DESIGN_BRAND_COLOR':'#BF00FF','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'top-left'},
+    'splitscreen': {'DESIGN_FONT':'anton','DESIGN_FONT_SIZE':'88','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'94','DESIGN_TRACKING':'normal','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_COLOR':'#FFE135','DESIGN_HIGHLIGHT_ENABLED':'false','DESIGN_ACCENT_COLOR':'#FFFFFF','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'false','DESIGN_SHADOW_TYPE':'outline','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'4','DESIGN_SHADOW_OPACITY':'255','DESIGN_GRADIENT':'none','DESIGN_GRADIENT_OPACITY':'0','DESIGN_GRADIENT_COVERAGE':'0','DESIGN_BRAND_FONT':'anton','DESIGN_BRAND_SIZE':'26','DESIGN_BRAND_COLOR':'#FFFFFF','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'center'},
+    'colorpop': {'DESIGN_FONT':'montserrat-extrabold','DESIGN_FONT_SIZE':'78','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'88','DESIGN_TRACKING':'tight','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#FF1C1C','DESIGN_HIGHLIGHT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#FF1C1C','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'outline','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'3','DESIGN_SHADOW_OPACITY':'200','DESIGN_GRADIENT':'left','DESIGN_GRADIENT_OPACITY':'140','DESIGN_GRADIENT_COVERAGE':'40','DESIGN_BRAND_FONT':'montserrat-extrabold','DESIGN_BRAND_SIZE':'24','DESIGN_BRAND_COLOR':'#FF1C1C','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'top-left'},
+    'retro': {'DESIGN_FONT':'dejavu','DESIGN_FONT_SIZE':'74','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'86','DESIGN_TRACKING':'normal','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#F2E8D5','DESIGN_HIGHLIGHT_COLOR':'#C45E26','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#C45E26','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'outline','DESIGN_SHADOW_COLOR':'#3D2B1F','DESIGN_SHADOW_SIZE':'3','DESIGN_SHADOW_OPACITY':'200','DESIGN_GRADIENT':'top-left','DESIGN_GRADIENT_OPACITY':'120','DESIGN_GRADIENT_COVERAGE':'35','DESIGN_BRAND_FONT':'dejavu','DESIGN_BRAND_SIZE':'24','DESIGN_BRAND_COLOR':'#C45E26','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'top-left'},
+    '3dextrude': {'DESIGN_FONT':'anton','DESIGN_FONT_SIZE':'96','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'102','DESIGN_TRACKING':'normal','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#FFD700','DESIGN_HIGHLIGHT_COLOR':'#FFD700','DESIGN_HIGHLIGHT_ENABLED':'false','DESIGN_ACCENT_COLOR':'#FFD700','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'false','DESIGN_SHADOW_TYPE':'outline','DESIGN_SHADOW_COLOR':'#4A2C00','DESIGN_SHADOW_SIZE':'5','DESIGN_SHADOW_OPACITY':'255','DESIGN_GRADIENT':'top-left','DESIGN_GRADIENT_OPACITY':'180','DESIGN_GRADIENT_COVERAGE':'45','DESIGN_BRAND_FONT':'anton','DESIGN_BRAND_SIZE':'28','DESIGN_BRAND_COLOR':'#FFD700','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'center-left'},
+    'glassmorphism': {'DESIGN_FONT':'montserrat-extrabold','DESIGN_FONT_SIZE':'74','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'86','DESIGN_TRACKING':'tight','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_COLOR':'#E0E0FF','DESIGN_HIGHLIGHT_ENABLED':'false','DESIGN_ACCENT_COLOR':'#A855F7','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'blur','DESIGN_SHADOW_COLOR':'#3B82F6','DESIGN_SHADOW_SIZE':'6','DESIGN_SHADOW_OPACITY':'80','DESIGN_GRADIENT':'top-left','DESIGN_GRADIENT_OPACITY':'100','DESIGN_GRADIENT_COVERAGE':'50','DESIGN_BRAND_FONT':'montserrat-extrabold','DESIGN_BRAND_SIZE':'22','DESIGN_BRAND_COLOR':'#A855F7','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'center-left'},
+    'darkacademia': {'DESIGN_FONT':'dejavu','DESIGN_FONT_SIZE':'72','DESIGN_LAST_LINE_SCALE':'10','DESIGN_LINE_HEIGHT':'84','DESIGN_TRACKING':'normal','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#D4A574','DESIGN_HIGHLIGHT_COLOR':'#F2E8D5','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#8B6F47','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'blur','DESIGN_SHADOW_COLOR':'#1A0E08','DESIGN_SHADOW_SIZE':'8','DESIGN_SHADOW_OPACITY':'180','DESIGN_GRADIENT':'top-left','DESIGN_GRADIENT_OPACITY':'170','DESIGN_GRADIENT_COVERAGE':'50','DESIGN_BRAND_FONT':'dejavu','DESIGN_BRAND_SIZE':'22','DESIGN_BRAND_COLOR':'#8B6F47','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'top-left'},
+    'boldoutline': {'DESIGN_FONT':'anton','DESIGN_FONT_SIZE':'92','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'98','DESIGN_TRACKING':'normal','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_ENABLED':'false','DESIGN_ACCENT_COLOR':'#FFFFFF','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'false','DESIGN_SHADOW_TYPE':'outline','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'6','DESIGN_SHADOW_OPACITY':'255','DESIGN_GRADIENT':'none','DESIGN_GRADIENT_OPACITY':'0','DESIGN_GRADIENT_COVERAGE':'0','DESIGN_BRAND_FONT':'anton','DESIGN_BRAND_SIZE':'28','DESIGN_BRAND_COLOR':'#FFFFFF','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'center-left'},
+    'elegantdark': {'DESIGN_FONT':'montserrat-extrabold','DESIGN_FONT_SIZE':'76','DESIGN_LAST_LINE_SCALE':'15','DESIGN_LINE_HEIGHT':'86','DESIGN_TRACKING':'tight','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#C9B37E','DESIGN_HIGHLIGHT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#C9B37E','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'blur','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'8','DESIGN_SHADOW_OPACITY':'190','DESIGN_GRADIENT':'top-left','DESIGN_GRADIENT_OPACITY':'170','DESIGN_GRADIENT_COVERAGE':'45','DESIGN_BRAND_FONT':'montserrat-extrabold','DESIGN_BRAND_SIZE':'24','DESIGN_BRAND_COLOR':'#C9B37E','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'top-left'},
+    'tiktok': {'DESIGN_FONT':'montserrat-extrabold','DESIGN_FONT_SIZE':'64','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'76','DESIGN_TRACKING':'tight','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_COLOR':'#FE2C55','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#25F4EE','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'outline','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'4','DESIGN_SHADOW_OPACITY':'220','DESIGN_GRADIENT':'top','DESIGN_GRADIENT_OPACITY':'180','DESIGN_GRADIENT_COVERAGE':'50','DESIGN_BRAND_FONT':'montserrat-extrabold','DESIGN_BRAND_SIZE':'22','DESIGN_BRAND_COLOR':'#FE2C55','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'center-left'},
+    'stories': {'DESIGN_FONT':'montserrat-extrabold','DESIGN_FONT_SIZE':'56','DESIGN_LAST_LINE_SCALE':'0','DESIGN_LINE_HEIGHT':'68','DESIGN_TRACKING':'tight','DESIGN_CASE':'upper','DESIGN_TEXT_COLOR':'#FFFFFF','DESIGN_HIGHLIGHT_COLOR':'#FF6B6B','DESIGN_HIGHLIGHT_ENABLED':'true','DESIGN_ACCENT_COLOR':'#FF6B6B','DESIGN_ACCENT_WIDTH':'250','DESIGN_ACCENT_HEIGHT':'5','DESIGN_ACCENT_GAP':'30','DESIGN_ACCENT_ENABLED':'true','DESIGN_SHADOW_TYPE':'blur','DESIGN_SHADOW_COLOR':'#000000','DESIGN_SHADOW_SIZE':'8','DESIGN_SHADOW_OPACITY':'200','DESIGN_GRADIENT':'top','DESIGN_GRADIENT_OPACITY':'200','DESIGN_GRADIENT_COVERAGE':'60','DESIGN_BRAND_FONT':'montserrat-extrabold','DESIGN_BRAND_SIZE':'20','DESIGN_BRAND_COLOR':'#FF6B6B','DESIGN_BRAND_POSITION':'bottom-left','DESIGN_POSITION':'center-left'},
+}
+
+
+def compose_thumbnail(bg, frase_curta, cores_str, output_path):
+    """Compoe thumbnail final: imagem + texto overlay com design configuravel."""
+    # Se tem random preset selecionado, aplicar env vars (salvo ou hardcoded)
+    random_preset = os.environ.get('DESIGN_RANDOM_PRESET', '')
+    if random_preset:
+        # Tentar carregar preset salvo (customizado) do env
+        saved_json = os.environ.get('DESIGN_SAVED_PRESET', '')
+        if saved_json:
+            try:
+                import json as _json
+                saved = _json.loads(saved_json)
+                field_map = {
+                    'font': 'DESIGN_FONT', 'fontSize': 'DESIGN_FONT_SIZE', 'lastLineScale': 'DESIGN_LAST_LINE_SCALE',
+                    'lineHeight': 'DESIGN_LINE_HEIGHT', 'tracking': 'DESIGN_TRACKING', 'case': 'DESIGN_CASE',
+                    'textColor': 'DESIGN_TEXT_COLOR', 'highlightColor': 'DESIGN_HIGHLIGHT_COLOR',
+                    'highlightEnabled': 'DESIGN_HIGHLIGHT_ENABLED', 'accentColor': 'DESIGN_ACCENT_COLOR',
+                    'shadowType': 'DESIGN_SHADOW_TYPE', 'shadowColor': 'DESIGN_SHADOW_COLOR',
+                    'shadowSize': 'DESIGN_SHADOW_SIZE', 'shadowOpacity': 'DESIGN_SHADOW_OPACITY',
+                    'gradient': 'DESIGN_GRADIENT', 'gradientOpacity': 'DESIGN_GRADIENT_OPACITY',
+                    'gradientCoverage': 'DESIGN_GRADIENT_COVERAGE', 'brand': 'DESIGN_BRAND',
+                    'brandFont': 'DESIGN_BRAND_FONT', 'brandSize': 'DESIGN_BRAND_SIZE',
+                    'brandColor': 'DESIGN_BRAND_COLOR', 'brandPosition': 'DESIGN_BRAND_POSITION',
+                    'position': 'DESIGN_POSITION'
+                }
+                for js_key, env_key in field_map.items():
+                    if js_key in saved:
+                        os.environ[env_key] = str(saved[js_key])
+            except Exception:
+                pass
+        elif random_preset in PRESETS:
+            for k, v in PRESETS[random_preset].items():
+                os.environ[k] = v
+        print(f'  [thumb] Preset ativo: {random_preset}')
+
+    # Read design config from env (set by scheduler from CONFIG sheet)
+    design_font = os.environ.get('DESIGN_FONT', 'dejavu')
+    design_font_size = int(os.environ.get('DESIGN_FONT_SIZE', THUMB_FONT_SIZE))
+    design_last_line_scale = int(os.environ.get('DESIGN_LAST_LINE_SCALE', '0'))
+    design_line_height = int(os.environ.get('DESIGN_LINE_HEIGHT', str(design_font_size + 16)))
+    design_tracking = os.environ.get('DESIGN_TRACKING', 'normal')
+    design_case = os.environ.get('DESIGN_CASE', 'upper')
+    design_text_color = hex_to_rgb(os.environ.get('DESIGN_TEXT_COLOR', THUMB_TEXT_COLOR))
+    design_highlight_color = hex_to_rgb(os.environ.get('DESIGN_HIGHLIGHT_COLOR', THUMB_ACCENT_COLOR))
+    design_highlight_enabled = os.environ.get('DESIGN_HIGHLIGHT_ENABLED', 'false') == 'true'
+    design_shadow_type = os.environ.get('DESIGN_SHADOW_TYPE', 'outline')
+    design_shadow_color = hex_to_rgb(os.environ.get('DESIGN_SHADOW_COLOR', '#000000'))
+    design_shadow_size = int(os.environ.get('DESIGN_SHADOW_SIZE', '3'))
+    design_shadow_opacity = int(os.environ.get('DESIGN_SHADOW_OPACITY', '255'))
+    design_gradient = os.environ.get('DESIGN_GRADIENT', 'none')
+    design_gradient_opacity = int(os.environ.get('DESIGN_GRADIENT_OPACITY', '140'))
+    design_gradient_coverage = int(os.environ.get('DESIGN_GRADIENT_COVERAGE', '40'))
+    design_accent_color = hex_to_rgb(os.environ.get('DESIGN_ACCENT_COLOR', THUMB_ACCENT_COLOR))
+    design_accent_width = int(os.environ.get('DESIGN_ACCENT_WIDTH', '250'))
+    design_accent_height = int(os.environ.get('DESIGN_ACCENT_HEIGHT', '5'))
+    design_accent_gap = int(os.environ.get('DESIGN_ACCENT_GAP', '30'))
+    design_accent_enabled = os.environ.get('DESIGN_ACCENT_ENABLED', 'true') == 'true'
+    design_stroke_enabled = os.environ.get('DESIGN_STROKE_ENABLED', 'false') == 'true'
+    design_stroke_color = hex_to_rgb(os.environ.get('DESIGN_STROKE_COLOR', '#000000'))
+    design_stroke_size = int(os.environ.get('DESIGN_STROKE_SIZE', '2'))
+    design_brand = os.environ.get('DESIGN_BRAND', BRAND)
+    design_brand_font = os.environ.get('DESIGN_BRAND_FONT', 'dejavu')
+    design_brand_size = int(os.environ.get('DESIGN_BRAND_SIZE', '26'))
+    design_brand_color = hex_to_rgb(os.environ.get('DESIGN_BRAND_COLOR', THUMB_BRAND_COLOR))
+    design_brand_position = os.environ.get('DESIGN_BRAND_POSITION', 'bottom-left')
+    design_position = os.environ.get('DESIGN_POSITION', THUMB_TEXT_POSITION)
+
+    font_path = FONT_MAP.get(design_font, FONT_MAP['dejavu'])
+    if not os.path.exists(font_path):
+        font_path = FONT_MAP['dejavu']
+
+    # Apply text case
+    text = frase_curta.upper() if design_case == 'upper' else frase_curta
+
+    # Convert to RGBA for compositing
+    bg = bg.convert('RGBA')
+
+    # --- Gradient overlay ---
+    if design_gradient != 'none':
+        gradient = Image.new('RGBA', (WIDTH, HEIGHT), (0, 0, 0, 0))
+        coverage_px = int(WIDTH * design_gradient_coverage / 100)
+        coverage_py = int(HEIGHT * design_gradient_coverage / 100)
+
+        for i in range(max(coverage_px, coverage_py)):
+            alpha = int(design_gradient_opacity * (1 - i / max(coverage_px, coverage_py)))
+            if alpha < 0:
+                alpha = 0
+
+            if design_gradient == 'left':
+                if i < coverage_px:
+                    line = Image.new('RGBA', (1, HEIGHT), (0, 0, 0, alpha))
+                    gradient.paste(line, (i, 0))
+            elif design_gradient == 'top':
+                if i < coverage_py:
+                    line = Image.new('RGBA', (WIDTH, 1), (0, 0, 0, alpha))
+                    gradient.paste(line, (0, i))
+            elif design_gradient == 'top-left':
+                if i < coverage_px:
+                    line = Image.new('RGBA', (1, HEIGHT), (0, 0, 0, alpha))
+                    gradient.paste(line, (i, 0))
+                if i < coverage_py:
+                    line = Image.new('RGBA', (WIDTH, 1), (0, 0, 0, max(0, alpha // 2)))
+                    gradient.paste(line, (0, i))
+            elif design_gradient == 'full-bottom':
+                if i < coverage_py:
+                    y = HEIGHT - 1 - i
+                    line = Image.new('RGBA', (WIDTH, 1), (0, 0, 0, alpha))
+                    gradient.paste(line, (0, y))
+
+        bg = Image.alpha_composite(bg, gradient)
+
+    # --- Text rendering ---
+    font = ImageFont.truetype(font_path, design_font_size)
+    max_text_width = int(WIDTH * 0.8)
+
+    draw_temp = ImageDraw.Draw(bg)
+    lines = wrap_text(text, font, max_text_width, draw_temp)
+
+    total_height = len(lines) * design_line_height
+
+    # Position
+    bottom_y = int(HEIGHT - total_height - HEIGHT * 0.12)
+    positions = {
+        'top-left':      (int(WIDTH * 0.05), int(HEIGHT * 0.08)),
+        'top-center':    (int(WIDTH * 0.05), int(HEIGHT * 0.08)),
+        'top-right':     (int(WIDTH * 0.05), int(HEIGHT * 0.08)),
+        'center':        (int(WIDTH * 0.05), int((HEIGHT - total_height) / 2)),
+        'center-left':   (int(WIDTH * 0.05), int((HEIGHT - total_height) / 2)),
+        'center-right':  (int(WIDTH * 0.05), int((HEIGHT - total_height) / 2)),
+        'bottom-left':   (int(WIDTH * 0.05), bottom_y),
+        'bottom-center': (int(WIDTH * 0.05), bottom_y),
+        'bottom-right':  (int(WIDTH * 0.05), bottom_y),
+    }
+    x_start, y_start = positions.get(design_position, positions['top-left'])
+
+    # Horizontal alignment
+    if 'right' in design_position:
+        max_line_w = max(draw_temp.textbbox((0, 0), l, font=font)[2] for l in lines) if lines else 0
+        x_start = WIDTH - max_line_w - int(WIDTH * 0.05)
+    elif 'center' in design_position and 'left' not in design_position and 'right' not in design_position:
+        max_line_w = max(draw_temp.textbbox((0, 0), l, font=font)[2] for l in lines) if lines else 0
+        x_start = int((WIDTH - max_line_w) / 2)
+
+    # --- Shadow / Outline ---
+    if design_shadow_type == 'blur':
+        # Create shadow layer
+        shadow_layer = Image.new('RGBA', (WIDTH, HEIGHT), (0, 0, 0, 0))
+        shadow_draw = ImageDraw.Draw(shadow_layer)
+        shadow_fill = (*design_shadow_color, design_shadow_opacity)
+
+        for i, line in enumerate(lines):
+            y = y_start + i * design_line_height
+            lx = x_start
+            if 'center' in design_position and 'left' not in design_position and 'right' not in design_position:
+                lw = shadow_draw.textbbox((0, 0), line, font=font)[2]
+                lx = int((WIDTH - lw) / 2)
+            cur_font = font
+            if i == len(lines) - 1 and design_last_line_scale > 0:
+                bigger = int(design_font_size * (1 + design_last_line_scale / 100))
+                cur_font = ImageFont.truetype(font_path, bigger)
+            shadow_draw.text((lx + 2, y + 2), line, font=cur_font, fill=shadow_fill)
+
+        shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=design_shadow_size))
+        bg = Image.alpha_composite(bg, shadow_layer)
+
+    draw = ImageDraw.Draw(bg)
+
+    if design_shadow_type == 'outline':
+        for i, line in enumerate(lines):
+            y = y_start + i * design_line_height
+            lx = x_start
+            if 'center' in design_position and 'left' not in design_position and 'right' not in design_position:
+                lw = draw.textbbox((0, 0), line, font=font)[2]
+                lx = int((WIDTH - lw) / 2)
+            cur_font = font
+            if i == len(lines) - 1 and design_last_line_scale > 0:
+                bigger = int(design_font_size * (1 + design_last_line_scale / 100))
+                cur_font = ImageFont.truetype(font_path, bigger)
+            sz = design_shadow_size
+            for dx in range(-sz, sz + 1):
+                for dy in range(-sz, sz + 1):
+                    if dx != 0 or dy != 0:
+                        draw.text((lx + dx, y + dy), line, font=cur_font, fill=design_shadow_color)
+
+    # --- Stroke (borda) ---
+    if design_stroke_enabled:
+        for i, line in enumerate(lines):
+            y = y_start + i * design_line_height
+            lx = x_start
+            if 'center' in design_position and 'left' not in design_position and 'right' not in design_position:
+                lw = draw.textbbox((0, 0), line, font=font)[2]
+                lx = int((WIDTH - lw) / 2)
+            cur_font = font
+            if i == len(lines) - 1 and design_last_line_scale > 0:
+                bigger = int(design_font_size * (1 + design_last_line_scale / 100))
+                cur_font = ImageFont.truetype(font_path, bigger)
+            sz = design_stroke_size
+            for dx in range(-sz, sz + 1):
+                for dy in range(-sz, sz + 1):
+                    if abs(dx) + abs(dy) >= sz:  # só bordas externas
+                        draw.text((lx + dx, y + dy), line, font=cur_font, fill=design_stroke_color)
+
+    # --- Main text ---
+    for i, line in enumerate(lines):
+        y = y_start + i * design_line_height
+        lx = x_start
+        if 'center' in design_position and 'left' not in design_position and 'right' not in design_position:
+            lw = draw.textbbox((0, 0), line, font=font)[2]
+            lx = int((WIDTH - lw) / 2)
+
+        is_last = (i == len(lines) - 1)
+        cur_font = font
+        if is_last and design_last_line_scale > 0:
+            bigger = int(design_font_size * (1 + design_last_line_scale / 100))
+            cur_font = ImageFont.truetype(font_path, bigger)
+
+        color = design_highlight_color if (is_last and design_highlight_enabled) else design_text_color
+        draw.text((lx, y), line, font=cur_font, fill=color)
+
+    # --- Accent line ---
+    if design_accent_enabled:
+        accent_y = y_start + total_height + design_accent_gap
+        draw.rectangle([x_start, accent_y, x_start + design_accent_width, accent_y + design_accent_height], fill=design_accent_color)
+
+    # --- Brand pill ---
+    brand_font_path = FONT_MAP.get(design_brand_font, FONT_MAP['dejavu'])
+    if not os.path.exists(brand_font_path):
+        brand_font_path = FONT_MAP['dejavu']
+    brand_font = ImageFont.truetype(brand_font_path, design_brand_size)
+    bbox = draw.textbbox((0, 0), design_brand, font=brand_font)
+    brand_w = bbox[2] - bbox[0]
+    brand_h = bbox[3] - bbox[1]
+
+    # Brand position
+    margin = 30
+    if 'right' in design_brand_position:
+        bx = WIDTH - brand_w - margin - 14
+    elif 'center' in design_brand_position:
+        bx = int((WIDTH - brand_w) / 2)
+    else:  # left (default)
+        bx = margin + 14
+    if 'top' in design_brand_position:
+        by = margin
+    else:  # bottom (default)
+        by = HEIGHT - brand_h - margin - 8
+
+    bg_pill = Image.new('RGBA', (WIDTH, HEIGHT), (0, 0, 0, 0))
+    pill_draw = ImageDraw.Draw(bg_pill)
+    pill_draw.rounded_rectangle(
+        [bx - 14, by - 8, bx + brand_w + 14, by + brand_h + 16],
+        radius=8, fill=(0, 0, 0, 180)
+    )
+    bg = Image.alpha_composite(bg, bg_pill)
+    draw = ImageDraw.Draw(bg)
+    draw.text((bx, by), design_brand, font=brand_font, fill=design_brand_color)
+
+    # Save as RGB JPEG
+    bg.convert('RGB').save(output_path, 'JPEG', quality=92)
+    return output_path
+
+
+def generate_thumbnail(title, description='', output_path='thumbnail.jpg'):
+    """Pipeline completo: LLM prompt -> IA image -> Pillow compose."""
+    try:
+        # 1. LLM gera prompt estruturado
+        prompt_data = generate_prompt_json(title, description)
+        print(f'  Frase: "{prompt_data["frase_curta"]}"', flush=True)
+        print(f'  Cena: {prompt_data["cena_principal"][:80]}...', flush=True)
+
+        # 2. Gera imagem
+        image_prompt = build_image_prompt(prompt_data)
+        bg = generate_ai_image(image_prompt)
+
+        # 3. Compoe thumbnail
+        print('  [3/3] Compondo thumbnail...', flush=True)
+        result = compose_thumbnail(bg, prompt_data['frase_curta'],
+                                   prompt_data.get('cores_dominantes', ''),
+                                   output_path)
+
+        # Salva JSON do prompt para referencia
+        json_path = output_path.rsplit('.', 1)[0] + '_prompt.json'
+        with open(json_path, 'w') as f:
+            json.dump(prompt_data, f, ensure_ascii=False, indent=2)
+
+        print(f'  Thumbnail salva: {result}', flush=True)
+        return result
+
+    except Exception as e:
+        print(f'  Erro no pipeline: {e}', file=sys.stderr)
+        print(f'  Usando fallback local...', flush=True)
+
+        bg = create_gradient_bg()
+        result = compose_thumbnail(bg, title[:70], '', output_path)
+        print(f'  Thumbnail (fallback): {result}', flush=True)
+        return result
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Gera thumbnail para clip YouTube com IA')
+    parser.add_argument('--title', '-t', required=True, help='Titulo do clip')
+    parser.add_argument('--description', '-d', default='', help='Descricao do conteudo')
+    parser.add_argument('--output', '-o', default='thumbnail.jpg', help='Arquivo de saida')
+    parser.add_argument('--model', '-m', default=None, help='Modelo de imagem')
+    args = parser.parse_args()
+
+    if args.model:
+        IMAGE_MODEL = args.model
+
+    generate_thumbnail(args.title, args.description, args.output)

@@ -1,0 +1,31 @@
+Analise esta transcrição de uma live do YouTube e identifique os TÓPICOS PRINCIPAIS.
+
+Para cada tópico, retorne:
+- start: timestamp de início (MM:SS)
+- end: timestamp de fim (MM:SS)
+- title: título curto e atrativo para YouTube (max 70 chars)
+- description: descrição de 2-3 frases para o YouTube
+- tags: lista de 3-5 tags relevantes
+
+Regras:
+- Cada clip deve ter entre 120 e 900 segundos
+- Ignore trechos de abertura/saudação e encerramento genérico
+- Foque em conteúdo educacional, dicas práticas e demonstrações
+- Títulos devem ser atrativos e usar palavras-chave de busca
+- Os clips NÃO devem se sobrepor
+
+Retorne APENAS um JSON válido com esta estrutura:
+{
+  "video_title": "título original resumido",
+  "topics": [
+    {
+      "start": "MM:SS",
+      "end": "MM:SS",
+      "title": "...",
+      "description": "...",
+      "tags": ["tag1", "tag2", "tag3"]
+    }
+  ]
+}
+
+TRANSCRIÇÃO:

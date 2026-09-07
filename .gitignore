@@ -1,0 +1,13 @@
+# segredos e estado — nunca no git
+.env
+config/.env
+config/client_secret.json
+config/credentials.enc
+config/.encryption_key
+data/
+entrada/
+canais/*.yaml
+!canais/_exemplo.yaml
+__pycache__/
+*.pyc
+*.bak

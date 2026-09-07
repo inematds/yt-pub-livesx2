@@ -1,0 +1,5 @@
+# stdlib faz quase tudo. Externos:
+cryptography>=41     # AES-GCM do credentials.enc (mesmo do v1)
+PyYAML>=6            # canais/*.yaml
+# scripts/yt-thumbnail (fase 2) precisa de Pillow: apt install python3-pil
+# yt-dlp e ffmpeg no PATH para scripts/yt-clip (fase 2)
