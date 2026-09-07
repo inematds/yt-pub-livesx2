@@ -51,6 +51,7 @@ def agendar(con, canais):
 def tick(con):
     canais = canais_mod.load_all()
     agendar(con, canais)
+    con.execute("DELETE FROM jobs WHERE tipo='scan_entrada' AND status='ok' AND fim_em < datetime('now','localtime','-1 day')")
     soltos = db.release_stuck_jobs(con)
     if soltos:
         log(f'{soltos} job(s) travado(s) voltaram pra fila')

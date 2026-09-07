@@ -97,8 +97,8 @@ def cmd_retry(a):
 
 def cmd_jobs(a):
     con = db.connect()
-    for r in con.execute('SELECT id,canal,tipo,status,run_at,resultado,erro FROM jobs ORDER BY id DESC LIMIT ?',
-                         (a.n,)).fetchall()[::-1]:
+    for r in con.execute("SELECT id,canal,tipo,status,run_at,resultado,erro FROM jobs WHERE tipo!='scan_entrada' "
+                         'ORDER BY id DESC LIMIT ?', (a.n,)).fetchall()[::-1]:
         print(f'#{r["id"]:<5} {r["run_at"]} {r["canal"]:<14} {r["tipo"]:<17} {r["status"]:<8} {r["resultado"] or r["erro"]}')
 
 

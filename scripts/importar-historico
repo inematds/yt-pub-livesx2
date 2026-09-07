@@ -59,10 +59,10 @@ def importar(inst, nome=None, log=print):
     })
     ypath = os.path.join(canais_mod.CANAIS_DIR, f'{nome}.yaml')
     if os.path.exists(ypath):
-        atual = canais_mod.load(nome)
-        canal['ativo'] = atual['ativo']  # nao desativa um canal ja ativado pelo usuario
-        canal['horarios'] = atual['horarios'] or canal['horarios']
-    canais_mod.save(canal)
+        canal = canais_mod.load(nome)  # YAML ja editado pelo usuario manda; so importa publicados
+    else:
+        canais_mod.save(canal)
+    os.makedirs(os.path.join(ROOT, 'entrada', nome), exist_ok=True)
     con = db.connect()
     db.upsert_canal(con, canal)
     n = 0

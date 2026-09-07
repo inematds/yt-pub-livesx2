@@ -72,7 +72,8 @@ class H(SimpleHTTPRequestHandler):
             return self._json([dict(r) for r in con.execute(q + ' ORDER BY canal,id LIMIT 500', args)])
         if u.path == '/api/jobs':
             return self._json([dict(r) for r in con.execute(
-                'SELECT id,canal,tipo,status,run_at,resultado,erro FROM jobs ORDER BY id DESC LIMIT 50')])
+                "SELECT id,canal,tipo,status,run_at,resultado,erro FROM jobs WHERE tipo!='scan_entrada' "
+                'ORDER BY id DESC LIMIT 50')])
         return self._json({'erro': 'nao encontrado'}, 404)
 
     def do_POST(self):
