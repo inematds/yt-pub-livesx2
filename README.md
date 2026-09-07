@@ -6,6 +6,7 @@ sem os 35 processos, 18 portas e 17 copias do codigo.
 
 - **Por que refazer:** [`docs/ANALISE.md`](docs/ANALISE.md) — numeros do v1, achados, os outros publicadores da casa, alternativas descartadas.
 - **Como funciona:** [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md) — fila de jobs, credenciais, migracao canal a canal, fase 2.
+- **Publicar fora do YouTube:** [`docs/PUBLICADORES.md`](docs/PUBLICADORES.md) — Blotato, Upload-Post, Postiz, Zernio, Ayrshare lado a lado e o encaixe na v2.
 
 ## Em 60 segundos
 
