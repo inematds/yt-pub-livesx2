@@ -102,6 +102,34 @@ def cmd_jobs(a):
         print(f'#{r["id"]:<5} {r["run_at"]} {r["canal"]:<14} {r["tipo"]:<17} {r["status"]:<8} {r["resultado"] or r["erro"]}')
 
 
+def cmd_social(a):
+    """Perfis do Upload-Post e contas conectadas."""
+    from lib import uploadpost
+    perfis, plano, limite = uploadpost.perfis()
+    print(f'plano={plano} perfis={len(perfis)}/{limite}')
+    for nome, contas in perfis.items():
+        print(f'  {nome:<14} ' + (', '.join(f'{p}={c}' for p, c in contas.items()) or 'nenhuma conta conectada'))
+
+
+def cmd_publicar_social(a):
+    """Publica um MP4 em TikTok/Instagram via Upload-Post (perfil = canal). Direto, sem fila (fase 2 integra)."""
+    from lib import uploadpost
+    arquivo = os.path.abspath(a.arquivo)
+    try:
+        urls = uploadpost.publish(arquivo, a.titulo, a.descricao or '', a.perfil, a.plataformas,
+                                  privacy=a.privacy or 'public', dry_run=a.dry_run, thumb=a.thumb or '')
+    except Exception as e:
+        sys.exit(f'FALHOU: {e}')
+    for p, u in urls.items():
+        print(f'{p}: {u}')
+    if not a.dry_run:
+        con = db.connect()
+        for p, u in urls.items():
+            db.add_clip(con, canal=a.perfil, arquivo=arquivo, titulo=a.titulo, descricao=a.descricao or '',
+                        origem=f'uploadpost:{p}', status='publicado', video_id=f'{p}:{u[-40:]}', url=u,
+                        publicado_em=db.now())
+
+
 def cmd_tick(a):
     import hub
     hub.tick(db.connect())
@@ -120,6 +148,12 @@ def main():
     x = sp.add_parser('canais'); x.add_argument('--token', action='store_true', help='testa refresh do OAuth'); x.set_defaults(f=cmd_canais)
     x = sp.add_parser('retry'); x.add_argument('clip_id', type=int); x.set_defaults(f=cmd_retry)
     x = sp.add_parser('jobs'); x.add_argument('n', nargs='?', type=int, default=20); x.set_defaults(f=cmd_jobs)
+    sp.add_parser('social', help='perfis/contas do Upload-Post').set_defaults(f=cmd_social)
+    x = sp.add_parser('publicar-social', help='MP4 -> TikTok/Instagram via Upload-Post'); x.set_defaults(f=cmd_publicar_social)
+    x.add_argument('arquivo'); x.add_argument('--perfil', required=True, help='perfil no Upload-Post (= canal)')
+    x.add_argument('--plataformas', default='tiktok,instagram'); x.add_argument('--titulo', required=True)
+    x.add_argument('--descricao'); x.add_argument('--privacy', choices=['public', 'private']); x.add_argument('--thumb')
+    x.add_argument('--dry-run', action='store_true')
     sp.add_parser('tick').set_defaults(f=cmd_tick)
     a = p.parse_args()
     a.f(a)
