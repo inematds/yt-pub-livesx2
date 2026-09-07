@@ -39,7 +39,12 @@ def send(chat_ids, texto, log=print):
     return ok
 
 
-def publicado(canal, clip, log=print):
-    texto = (f"✅ <b>{canal.get('destino_nome') or canal['nome']}</b>\n"
-             f"{clip['titulo']}\n{clip['url']}")
+REDE_EMOJI = {'youtube': '▶️', 'tiktok': '🎵', 'instagram': '📸', 'facebook': '👥',
+              'linkedin': '💼', 'x': '𝕏', 'threads': '@'}
+
+
+def publicado(canal, clip, destino='youtube', log=print):
+    rede = destino.split(':')[-1]
+    texto = (f"{REDE_EMOJI.get(rede, '✅')} <b>{canal.get('destino_nome') or canal['nome']}</b>"
+             f" · {rede}\n{clip['titulo']}\n{clip['url']}")
     return send(canal.get('telegram_chat_ids', []), texto, log)

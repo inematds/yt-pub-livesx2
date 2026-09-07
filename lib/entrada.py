@@ -43,21 +43,26 @@ def scan_entrada(con, canal, dir_=None, log=print):
     pasta = os.path.join(dir_ or ENTRADA_DIR, canal['nome'])
     if not os.path.isdir(pasta):
         return 0
-    ja = {r[0] for r in con.execute('SELECT arquivo FROM clips WHERE canal=?', (canal['nome'],))}
+    ja = {(r['arquivo'], r['destino']) for r in
+          con.execute('SELECT arquivo, destino FROM clips WHERE canal=?', (canal['nome'],))}
     novos = 0
     for f in sorted(os.listdir(pasta)):
         if not f.lower().endswith(('.mp4', '.mov', '.mkv', '.webm')):
             continue
         path = os.path.abspath(os.path.join(pasta, f))
-        if path in ja or time.time() - os.path.getmtime(path) < 60:
+        if time.time() - os.path.getmtime(path) < 60:
+            continue  # ainda pode estar sendo escrito
+        destinos = canal.get('destinos') or [{'destino': 'youtube', 'privacy': canal.get('privacy', 'public')}]
+        faltam = [d for d in destinos if (path, d['destino']) not in ja]
+        if not faltam:
             continue
         m = meta_do_lado(path)
         tags = m.get('tags', '')
         if isinstance(tags, list):
             tags = ','.join(tags)
-        db.add_clip(con, canal=canal['nome'], arquivo=path, titulo=m.get('titulo') or titulo_do_nome(f),
-                    descricao=m.get('descricao', ''), tags=tags, privacy=m.get('privacy') or canal['privacy'],
-                    thumb=m.get('thumb', ''), origem='entrada')
-        log(f'  [{canal["nome"]}] entrada -> fila: {f}')
+        db.enfileirar(con, canal['nome'], faltam, privacy=m.get('privacy'), arquivo=path,
+                      titulo=m.get('titulo') or titulo_do_nome(f), descricao=m.get('descricao', ''),
+                      tags=tags, thumb=m.get('thumb', ''), origem='entrada')
+        log(f'  [{canal["nome"]}] entrada -> fila ({", ".join(d["destino"] for d in faltam)}): {f}')
         novos += 1
     return novos

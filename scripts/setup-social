@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Prepara TikTok/Instagram em todos os canais de uma vez (Upload-Post).
+
+  scripts/setup-social --plano                 mostra plano, limite de perfis e o que falta
+  scripts/setup-social --preparar              cria os perfis e ADICIONA os destinos nos YAML
+  scripts/setup-social --links                 imprime 1 link de autorizacao por canal
+  scripts/setup-social --links --so lives2     so um canal
+  scripts/setup-social --checar                quais canais ja tem cada rede conectada
+
+Opcoes: --redes tiktok,instagram (default) · --horarios "10:00,19:00" (default: os do canal)
+
+O que o script NAO faz: autorizar as contas. Isso e OAuth na propria rede e so o dono faz,
+abrindo os links do `--links` num navegador logado. O script cuida de todo o resto.
+"""
+import argparse
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+from lib import canais as canais_mod, uploadpost  # noqa: E402
+
+
+def carregar(so=None):
+    todos = canais_mod.load_all()
+    if so:
+        alvo = [s.strip() for s in so.split(',') if s.strip()]
+        falta = [a for a in alvo if a not in todos]
+        if falta:
+            sys.exit(f'canal(is) inexistente(s): {falta}')
+        return {k: v for k, v in todos.items() if k in alvo}
+    return todos
+
+
+def cmd_plano(args):
+    perfis, plano, limite = uploadpost.perfis()
+    canais = carregar(args.so)
+    precisam = [c for c in canais.values() if c['uploadpost_perfil'] not in perfis]
+    print(f'plano={plano}  perfis usados={len(perfis)}  limite={limite}')
+    print(f'canais no hub={len(canais)}  perfis a criar={len(precisam)}')
+    if limite and len(perfis) + len(precisam) > limite:
+        print(f'\nNAO CABE: precisa de {len(perfis) + len(precisam)} perfis e o plano permite {limite}.')
+        print('O plano Professional (25 perfis) cobre os canais de hoje com folga.')
+    else:
+        print('\nCabe no plano atual.')
+
+
+def cmd_preparar(args):
+    redes = [r.strip() for r in args.redes.split(',') if r.strip()]
+    horarios = [h.strip() for h in args.horarios.split(',') if h.strip()] if args.horarios else None
+    criados = editados = 0
+    for nome, c in carregar(args.so).items():
+        perfil = c['uploadpost_perfil']
+        try:
+            if uploadpost.criar_perfil(perfil):
+                criados += 1
+        except Exception as e:
+            print(f'{nome:<12} ERRO ao criar perfil: {e}')
+            continue
+        tem = {d['destino'] for d in c['destinos']}
+        novos = [f'uploadpost:{r}' for r in redes if f'uploadpost:{r}' not in tem]
+        if novos:
+            for d in novos:
+                c['destinos'].append({'destino': d, 'horarios': horarios or c['horarios'],
+                                      'privacy': c['privacy']})
+            canais_mod.save(c)
+            editados += 1
+        print(f'{nome:<12} perfil={perfil:<12} destinos={", ".join(d["destino"] for d in c["destinos"])}')
+    print(f'\n{criados} perfil(is) criado(s), {editados} YAML(s) atualizado(s).')
+    print('Agora: scripts/setup-social --links  e abra cada link pra autorizar.')
+
+
+def cmd_links(args):
+    redes = [r.strip() for r in args.redes.split(',') if r.strip()]
+    for nome, c in carregar(args.so).items():
+        alvo = [d['destino'].split(':')[1] for d in c['destinos'] if d['destino'].startswith('uploadpost:')] or redes
+        try:
+            uploadpost.criar_perfil(c['uploadpost_perfil'])
+            url = uploadpost.link_conexao(c['uploadpost_perfil'], alvo,
+                                          titulo=f'{c.get("destino_nome") or nome} — conectar contas')
+        except Exception as e:
+            print(f'{nome:<12} ERRO: {e}')
+            continue
+        print(f'\n## {nome}  ({c.get("destino_nome") or "?"})  redes: {", ".join(alvo)}\n{url}')
+    print('\nAbra cada link num navegador logado nas contas daquele canal. Validade ~48h.')
+
+
+def cmd_checar(args):
+    perfis, plano, _ = uploadpost.perfis()
+    print(f'plano={plano}')
+    for nome, c in carregar(args.so).items():
+        perfil = c['uploadpost_perfil']
+        redes = [d['destino'].split(':')[1] for d in c['destinos'] if d['destino'].startswith('uploadpost:')]
+        if not redes:
+            print(f'{nome:<12} sem destino uploadpost no YAML')
+            continue
+        contas = perfis.get(perfil)
+        if contas is None:
+            print(f'{nome:<12} perfil "{perfil}" nao existe')
+        else:
+            falta = [r for r in redes if r not in contas]
+            print(f'{nome:<12} {"FALTA " + ",".join(falta) if falta else "OK"}  ({", ".join(contas) or "vazio"})')
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--plano', action='store_true'); p.add_argument('--preparar', action='store_true')
+    p.add_argument('--links', action='store_true'); p.add_argument('--checar', action='store_true')
+    p.add_argument('--redes', default='tiktok,instagram'); p.add_argument('--horarios', default='')
+    p.add_argument('--so', help='so estes canais (separados por virgula)')
+    a = p.parse_args()
+    for flag, fn in (('plano', cmd_plano), ('preparar', cmd_preparar), ('links', cmd_links), ('checar', cmd_checar)):
+        if getattr(a, flag):
+            return fn(a)
+    p.print_help()
+
+
+if __name__ == '__main__':
+    main()

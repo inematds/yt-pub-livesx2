@@ -63,16 +63,18 @@ class H(SimpleHTTPRequestHandler):
         if u.path == '/api/status':
             for c in canais_mod.load_all().values():
                 db.upsert_canal(con, c)
-            return self._json({'versao': VERSION, 'canais': [dict(r) for r in db.resumo_canais(con)]})
+            return self._json({'versao': VERSION, 'canais': [dict(r) for r in db.resumo_canais(con)],
+                               'destinos': [dict(r) for r in db.resumo_destinos(con)]})
         if u.path == '/api/fila':
-            q = "SELECT id,canal,status,tentativas,titulo,origem,erro,criado_em FROM clips WHERE status!='publicado'"
+            q = ("SELECT id,canal,destino,status,tentativas,titulo,origem,erro,criado_em FROM clips "
+                 "WHERE status NOT IN ('publicado')")
             args = ()
             if qs.get('canal'):
                 q += ' AND canal=?'; args = (qs['canal'][0],)
             return self._json([dict(r) for r in con.execute(q + ' ORDER BY canal,id LIMIT 500', args)])
         if u.path == '/api/jobs':
             return self._json([dict(r) for r in con.execute(
-                "SELECT id,canal,tipo,status,run_at,resultado,erro FROM jobs WHERE tipo!='scan_entrada' "
+                "SELECT id,canal,tipo,status,run_at,payload,resultado,erro FROM jobs WHERE tipo!='scan_entrada' "
                 'ORDER BY id DESC LIMIT 50')])
         return self._json({'erro': 'nao encontrado'}, 404)
 
@@ -82,7 +84,8 @@ class H(SimpleHTTPRequestHandler):
             return self._json({'erro': 'senha'}, 401)
         if u.path.startswith('/api/retry/'):
             con = db.connect()
-            n = con.execute("UPDATE clips SET status='fila', erro='', tentativas=0 WHERE id=? AND status='erro'",
+            n = con.execute("UPDATE clips SET status='fila', erro='', tentativas=0 "
+                            "WHERE id=? AND status IN ('erro','pulado')",
                             (int(u.path.rsplit('/', 1)[1]),)).rowcount
             return self._json({'ok': bool(n)})
         return self._json({'erro': 'nao encontrado'}, 404)

@@ -34,16 +34,19 @@ def agendar(con, canais):
         db.upsert_canal(con, c)
         if not c['ativo']:
             continue
-        for hm in c['horarios']:
-            run_at = f'{hoje} {hm}:00'
-            try:
-                atraso = (datetime.now() - datetime.strptime(run_at, '%Y-%m-%d %H:%M:%S')).total_seconds()
-            except ValueError:
-                log(f'[{nome}] horario invalido no YAML: {hm!r}')
-                continue
-            if atraso > 3600:
-                continue  # horario ja passou ha mais de 1h (ex.: hub subiu tarde): nao publica retroativo
-            db.add_job(con, nome, 'publicar_proximo', run_at, chave=f'pub:{nome}:{hoje} {hm}')
+        for d in c['destinos']:
+            for hm in d['horarios']:
+                run_at = f'{hoje} {hm}:00'
+                try:
+                    atraso = (datetime.now() - datetime.strptime(run_at, '%Y-%m-%d %H:%M:%S')).total_seconds()
+                except ValueError:
+                    log(f'[{nome}/{d["destino"]}] horario invalido no YAML: {hm!r}')
+                    continue
+                if atraso > 3600:
+                    continue  # ja passou ha mais de 1h (hub subiu tarde): nao publica retroativo
+                db.add_job(con, nome, 'publicar_proximo', run_at,
+                           payload=json.dumps({'destino': d['destino']}),
+                           chave=f'pub:{nome}:{d["destino"]}:{hoje} {hm}')
         slot = datetime.now().strftime('%Y-%m-%d %H:') + f'{(datetime.now().minute // 5) * 5:02d}'
         db.add_job(con, nome, 'scan_entrada', agora, chave=f'scan:{nome}:{slot}')
 
@@ -59,7 +62,8 @@ def tick(con):
         if not db.claim_job(con, job['id']):
             continue
         if job['tipo'] != 'scan_entrada':
-            log(f'job #{job["id"]} {job["tipo"]} [{job["canal"]}]')
+            alvo = json.loads(job['payload'] or '{}').get('destino', '')
+            log(f'job #{job["id"]} {job["tipo"]} [{job["canal"]}{"/" + alvo if alvo else ""}]')
         runner.run_job(con, job, canais, dry_run=DRY_RUN, log=log)
 
 

@@ -4,6 +4,7 @@ Regra: quem publica e o job. Um clip na fila so sai pela tabela jobs.
 """
 import os
 import sqlite3
+import uuid
 from datetime import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,6 +23,8 @@ CREATE TABLE IF NOT EXISTS canais (
 CREATE TABLE IF NOT EXISTS clips (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     canal TEXT NOT NULL,
+    destino TEXT NOT NULL DEFAULT 'youtube',  -- youtube | uploadpost:tiktok | uploadpost:instagram
+    grupo TEXT NOT NULL DEFAULT '',           -- mesmo arquivo em varios destinos = mesmo grupo
     arquivo TEXT NOT NULL DEFAULT '',
     titulo TEXT NOT NULL DEFAULT '',
     descricao TEXT NOT NULL DEFAULT '',
@@ -29,16 +32,16 @@ CREATE TABLE IF NOT EXISTS clips (
     privacy TEXT NOT NULL DEFAULT 'public',
     thumb TEXT NOT NULL DEFAULT '',
     origem TEXT NOT NULL DEFAULT 'cli',      -- cli | entrada | live:<video_id> | v1
-    status TEXT NOT NULL DEFAULT 'fila',     -- fila | publicando | publicado | erro
-    video_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'fila',     -- fila | publicando | publicado | erro | pulado
+    video_id TEXT NOT NULL DEFAULT '',       -- id externo na plataforma
     url TEXT NOT NULL DEFAULT '',
     tentativas INTEGER NOT NULL DEFAULT 0,
     erro TEXT NOT NULL DEFAULT '',
     criado_em TEXT NOT NULL DEFAULT '',
     publicado_em TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_clips_canal_status ON clips(canal, status);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_clips_video ON clips(canal, video_id) WHERE video_id != '';
+CREATE INDEX IF NOT EXISTS idx_clips_fila ON clips(canal, destino, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_clips_video ON clips(canal, destino, video_id) WHERE video_id != '';
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     chave TEXT UNIQUE,                       -- idempotencia: pub:<canal>:<YYYY-MM-DD HH:MM>
@@ -71,6 +74,29 @@ def now():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
+MIGRACOES = [
+    # (coluna nova em clips, definicao) — ALTER TABLE so roda se a coluna faltar
+    ('destino', "TEXT NOT NULL DEFAULT 'youtube'"),
+    ('grupo', "TEXT NOT NULL DEFAULT ''"),
+]
+
+
+def _migrar(con):
+    """Banco criado antes dos destinos: adiciona colunas e refaz o indice unico."""
+    cols = {r['name'] for r in con.execute('PRAGMA table_info(clips)')}
+    if not cols:
+        return
+    mudou = False
+    for nome, defi in MIGRACOES:
+        if nome not in cols:
+            con.execute(f'ALTER TABLE clips ADD COLUMN {nome} {defi}')
+            mudou = True
+    if mudou:
+        # o indice antigo era (canal, video_id); agora precisa incluir o destino
+        con.execute('DROP INDEX IF EXISTS idx_clips_video')
+        con.execute('DROP INDEX IF EXISTS idx_clips_canal_status')
+
+
 def connect(path=None):
     path = path or DB_PATH
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -78,6 +104,7 @@ def connect(path=None):
     con.row_factory = sqlite3.Row
     con.execute('PRAGMA journal_mode=WAL')
     con.execute('PRAGMA busy_timeout=30000')
+    _migrar(con)
     con.executescript(SCHEMA)
     return con
 
@@ -99,9 +126,23 @@ def add_clip(con, **f):
     return con.execute(f'INSERT INTO clips({cols}) VALUES({marks})', tuple(f.values())).lastrowid
 
 
-def next_clip(con, canal):
-    return con.execute("SELECT * FROM clips WHERE canal=? AND status='fila' ORDER BY id LIMIT 1",
-                       (canal,)).fetchone()
+def enfileirar(con, canal_nome, destinos, privacy=None, **campos):
+    """Uma linha de clip por destino, todas no mesmo grupo. Retorna {destino: clip_id}.
+
+    `destinos` = lista de dicts {destino, privacy} (o formato normalizado de canais.py).
+    `privacy` explicito (ex.: da CLI) vence o privacy do destino.
+    """
+    grupo = uuid.uuid4().hex[:12]
+    out = {}
+    for d in destinos or [{'destino': 'youtube', 'privacy': 'public'}]:
+        out[d['destino']] = add_clip(con, canal=canal_nome, destino=d['destino'], grupo=grupo,
+                                     privacy=privacy or d.get('privacy') or 'public', **campos)
+    return out
+
+
+def next_clip(con, canal, destino='youtube'):
+    return con.execute("SELECT * FROM clips WHERE canal=? AND destino=? AND status='fila' ORDER BY id LIMIT 1",
+                       (canal, destino)).fetchone()
 
 
 def claim_clip(con, clip_id):
@@ -111,10 +152,13 @@ def claim_clip(con, clip_id):
     return cur.rowcount == 1
 
 
-def finish_clip(con, clip_id, video_id=None, erro=None, requeue=False):
+def finish_clip(con, clip_id, video_id=None, url=None, erro=None, requeue=False, pulado=False):
     if video_id:
+        url = url or f'https://www.youtube.com/watch?v={video_id}'
         con.execute("UPDATE clips SET status='publicado', video_id=?, url=?, erro='', publicado_em=? WHERE id=?",
-                    (video_id, f'https://www.youtube.com/watch?v={video_id}', now(), clip_id))
+                    (video_id, url, now(), clip_id))
+    elif pulado:
+        con.execute("UPDATE clips SET status='pulado', erro=? WHERE id=?", ((erro or '')[:500], clip_id))
     else:
         status = 'fila' if requeue else 'erro'
         con.execute("UPDATE clips SET status=?, erro=? WHERE id=?", (status, (erro or '')[:500], clip_id))
@@ -129,6 +173,16 @@ def resumo_canais(con):
           MAX(CASE WHEN k.status='publicado' THEN k.publicado_em END) AS ultimo
         FROM canais c LEFT JOIN clips k ON k.canal=c.nome
         GROUP BY c.nome ORDER BY c.nome""").fetchall()
+
+
+def resumo_destinos(con):
+    """Fila/publicados/erros por canal e destino — so destinos que ja tem alguma linha."""
+    return con.execute("""
+        SELECT canal, destino,
+          SUM(status='fila') AS fila, SUM(status='publicado') AS publicados,
+          SUM(status='erro') AS erros, SUM(status='pulado') AS pulados,
+          MAX(CASE WHEN status='publicado' THEN publicado_em END) AS ultimo
+        FROM clips GROUP BY canal, destino ORDER BY canal, destino""").fetchall()
 
 
 # --- jobs -----------------------------------------------------------------

@@ -17,3 +17,18 @@ max_tentativas: 3                           # falha transitoria (rede, 5xx) volt
 
 telegram_chat_ids: []                       # ex.: ["7852460115", "-100123"]; token em <raiz>/.env
 ativo: true
+
+# --- Destinos (opcional) -----------------------------------------------------
+# Sem este bloco: so YouTube, nos horarios acima. Cada destino tem fila propria,
+# retry proprio e pode ter horario proprio; um destino que falha nao trava os outros.
+# TikTok/Instagram saem pelo Upload-Post: a conta e autorizada uma vez pelo dono
+# (scripts/setup-social --links) e a API key fica em ~/projetos/wifi/.env.
+#
+# destinos:
+#   - youtube                               # herda horarios e privacy do canal
+#   - uploadpost:tiktok                     # idem
+#   - destino: uploadpost:instagram         # horario proprio
+#     horarios: ["19:00"]
+#     privacy: public
+#
+# uploadpost_perfil: ""                     # default: o nome do canal
