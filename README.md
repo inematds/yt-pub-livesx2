@@ -1,5 +1,7 @@
 # yt-pub-livesx2
 
+**🇧🇷 [Português](README.md) · 🇺🇸 [English](README.en.md) · 🇪🇸 [Español](README.es.md)**
+
 Publicador de videos no YouTube para N canais: **1 daemon, 1 banco, 1 painel, N arquivos YAML**.
 Versao 2 do [yt-pub-livesx](../yt-pub-livesx) — mesmo trabalho (clips de lives, imports, TikTok → YouTube),
 sem os 35 processos, 18 portas e 17 copias do codigo.
